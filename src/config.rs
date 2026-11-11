@@ -119,13 +119,19 @@ impl Default for Config {
     }
 }
 
-/// `$XDG_CONFIG_HOME/e` or `~/.config/e`.
+/// `$XDG_CONFIG_HOME/e` or `~/.config/e`. A relative `XDG_CONFIG_HOME` is ignored, as the XDG
+/// base directory spec requires.
 pub fn config_dir() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(x) if !x.is_empty() => PathBuf::from(x),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    let base = match std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        Some(x) if x.is_absolute() => x,
+        _ => home_dir()?.join(".config"),
     };
     Some(base.join("e"))
+}
+
+/// `$HOME`, if it is set to an absolute path.
+pub fn home_dir() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("HOME")?)).filter(|h| h.is_absolute())
 }
 
 impl Config {

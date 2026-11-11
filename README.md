@@ -20,12 +20,14 @@ cd path/to/target && e
 ```bash
 e -p "Audit src/Vault.sol"            # headless: prints the final message
 e -p "Audit src/Vault.sol" --json     # headless: transcript events as JSON lines
+e -p "/reentrancy Audit src/Vault.sol" # start a skill, then the task
 ```
 
-At the prompt: `/model <id>`, `/new`. Ctrl-X Ctrl-E opens the prompt in
-`$VISUAL` (else `$EDITOR`, else `vi`); when you save and quit, the text comes
-back to the prompt for Enter to send, and quitting with an error (vim's `:cq`)
-leaves the prompt as it was. Ctrl-C cancels a run, Ctrl-D exits.
+At the prompt: `/model <id>`, `/new`, `/skills`, `/<skill> [task]` (Tab completes names).
+Ctrl-X Ctrl-E opens the prompt in `$VISUAL` (else `$EDITOR`, else `vi`); when
+you save and quit, the text comes back to the prompt for Enter to send, and
+quitting with an error (vim's `:cq`) leaves the prompt as it was. Ctrl-C
+cancels a run, Ctrl-D exits.
 `--verbose` shows reasoning and full tool output.
 
 Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
@@ -37,9 +39,41 @@ Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
 | --- | --- | --- |
 | `AUDIT.md` | you | Scope, trust assumptions, known issues, build and test commands. Appended to the system prompt. |
 | `NOTES.md` | the agent | Memory between runs. The harness never parses it. |
-| `skills/<name>/SKILL.md` | you | Frontmatter `name` and `description`. Also read from `~/.config/e/skills`. |
+| `skills/<name>/` | you | Project [skills](#skills). |
 | `runs/<timestamp>/` | harness | `transcript.jsonl`, plus `bash/` and `poc/` output logs. One per session. |
 | `findings/<id>.json` | `finding` tool | Status is `proven` only if `poc_cmd` exited 0 when the harness ran it. |
+
+## Skills
+
+Skills follow the [Agent Skills](https://agentskills.io/specification) format, so skills
+written for other agents work unchanged. A skill is a directory with a `SKILL.md` (YAML
+frontmatter with `name` and `description`, then instructions) and any other files it needs,
+conventionally under `scripts/`, `references/` and `assets/`.
+
+`e` looks in these directories, first match wins on a name clash:
+
+1. `.e/skills/` in the working directory
+2. `~/.config/e/skills/` (`$XDG_CONFIG_HOME/e/skills/`)
+3. `~/.agents/skills/`
+
+To install a skill, copy or symlink its directory into one of them. The target's own
+`.agents/skills/` and `.claude/skills/` are not read: they come with the code under audit,
+which is untrusted.
+
+The system prompt lists each skill's name, description and the absolute path of its
+`SKILL.md`. The model reads a `SKILL.md` when the skill fits the task, and loads the files it
+references on demand, resolving relative paths against the skill's directory. Skills are found
+when a session starts (launch or `/new`); `/skills` lists them.
+
+You can also start a skill yourself: `/<name> [task]`, at the prompt or as the start of a `-p`
+task. `e` sends the `SKILL.md` instructions (read at that moment, frontmatter removed), the
+skill's directory and a list of its files, then your task. Starting the same skill again in a
+session refers back to it instead of repeating it. A skill with `disable-model-invocation:
+true` is left out of the system prompt, so only you can start it. `/model`, `/new` and
+`/skills` take precedence over skills of the same name. In a `-p` task, `/word` that names no
+skill is sent as written, so a task can start with a path. Frontmatter that breaks the spec, such as a `name`
+that doesn't match its directory, produces a warning. A skill without a description or with
+frontmatter that can't be parsed is skipped with a warning.
 
 ## Config
 

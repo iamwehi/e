@@ -4,7 +4,11 @@ use e::agent::{RunEnd, Session};
 use e::config::Config;
 use e::exec::{self, Cancel};
 use e::term::{self, Ui};
+use rustyline::completion::Completer;
 use rustyline::error::ReadlineError;
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::validate::Validator;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,8 +20,9 @@ const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
   --model ID   model to use (default from config)
   -v, --verbose  show reasoning and full tool output
 
-Interactive commands: /model <id>, /new. Ctrl-X Ctrl-E (editor_key in the
-config) opens the prompt in $VISUAL or $EDITOR. Ctrl-C cancels a run, Ctrl-D exits.
+Interactive commands: /model <id>, /new, /skills, /<skill> [task]. A TASK
+may also start with /<skill>. Ctrl-X Ctrl-E (editor_key in the config) opens
+the prompt in $VISUAL or $EDITOR. Ctrl-C cancels a run, Ctrl-D exits.
 Provider: Venice by default (key in VENICE_API_KEY); any OpenAI-compatible
 API via config. Config: $E_CONFIG or ~/.config/e/config.toml.";
 
@@ -46,6 +51,52 @@ fn parse_args() -> Result<Args, String> {
         return Err("--json needs -p".into());
     }
     Ok(a)
+}
+
+/// Built-in commands; they take precedence over skills of the same name.
+const COMMANDS: [&str; 3] = ["model", "new", "skills"];
+const HELP: &str = "commands: /model <id>, /new, /skills, /<skill> [task]";
+
+/// Tab completion of `/command` and `/skill` names.
+struct Commands(Vec<String>);
+
+impl Commands {
+    fn of(s: &Session) -> Self {
+        let mut names: Vec<String> = COMMANDS.iter().map(|c| c.to_string()).collect();
+        names.extend(s.skills.iter().map(|k| k.name.clone()).filter(|n| !COMMANDS.contains(&n.as_str())));
+        Commands(names)
+    }
+}
+
+impl Completer for Commands {
+    type Candidate = String;
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        match line[..pos].strip_prefix('/') {
+            Some(word) if !word.contains(char::is_whitespace) => {
+                Ok((1, self.0.iter().filter(|n| n.starts_with(word)).cloned().collect()))
+            }
+            _ => Ok((pos, Vec::new())),
+        }
+    }
+}
+impl Hinter for Commands {
+    type Hint = String;
+}
+impl Highlighter for Commands {}
+impl Validator for Commands {}
+impl rustyline::Helper for Commands {}
+
+/// `/name task` as the message that starts skill `name`: `None` if no skill has that name
+/// (so `/src/Vault.sol is in scope` stays an ordinary task).
+fn skill_task(s: &mut Session, line: &str) -> Option<Result<String, String>> {
+    let cmd = line.strip_prefix('/')?;
+    let (name, task) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
+    s.skill_message(name, task)
 }
 
 /// The run Ctrl-C should cancel, if one is active.
@@ -160,6 +211,15 @@ async fn headless(mut s: Session, task: &str, json: bool, verbose: bool) -> u8 {
             ui.notice(&format!("warning: {w}"));
         }
     }
+    let expanded = match skill_task(&mut s, task) {
+        None => None,
+        Some(Ok(msg)) => Some(msg),
+        Some(Err(e)) => {
+            eprintln!("e: skill: {}", term::sanitize(&e));
+            return 1;
+        }
+    };
+    let task = expanded.as_deref().unwrap_or(task);
     let cancel = Cancel::default();
     set_current(Some(cancel.clone()));
     let end = s.run(task, &cancel, &mut |ev| ui.event(ev)).await;
@@ -178,8 +238,11 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
     // The line editor writes escape codes; use plain line reading unless both ends are a terminal.
     let mut editor = match term::isatty(0) && term::isatty(1) {
         false => None,
-        true => match rustyline::DefaultEditor::new() {
-            Ok(e) => Some(e),
+        true => match rustyline::Editor::<Commands, rustyline::history::DefaultHistory>::new() {
+            Ok(mut e) => {
+                e.set_helper(Some(Commands::of(&s)));
+                Some(e)
+            }
             Err(e) => {
                 eprintln!("e: line editor: {e}");
                 return 1;
@@ -197,6 +260,12 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
         ui.notice(&format!("e · {} · {} · log {}", s.model, s.cwd.display(), s.transcript.dir.display()));
         for w in &s.warnings {
             ui.notice(&format!("warning: {w}"));
+        }
+        for k in s.skills.iter().filter(|k| COMMANDS.contains(&k.name.as_str())) {
+            ui.notice(&format!(
+                "warning: skill \"{}\" can't be started with /{0}: that is a command",
+                k.name
+            ));
         }
     };
     greet(&mut ui, &s);
@@ -249,39 +318,88 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('/') {
-            let mut parts = line.split_whitespace();
-            match (parts.next(), parts.next(), parts.next()) {
-                (Some("/model"), Some(id), None) => {
-                    s.model = id.to_string();
-                    if !s.cfg.prices.contains_key(id) {
-                        ui.notice(&format!("no prices for {id}: showing token counts"));
+        let task = match line.strip_prefix('/') {
+            None => line,
+            Some(cmd) => {
+                let (name, arg) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
+                let task = match (name, arg.trim()) {
+                    ("model", "") => {
+                        ui.notice(&format!("model: {}", s.model));
+                        None
                     }
-                }
-                (Some("/model"), None, _) => ui.notice(&format!("model: {}", s.model)),
-                (Some("/new"), None, _) => {
-                    let (cfg, model, cwd) = (s.cfg.clone(), s.model.clone(), s.cwd.clone());
-                    match Session::new(cfg, model, cwd, false) {
-                        Ok(n) => {
-                            s = n;
-                            greet(&mut ui, &s);
+                    ("model", id) if !id.contains(char::is_whitespace) => {
+                        s.model = id.to_string();
+                        if !s.cfg.prices.contains_key(id) {
+                            ui.notice(&format!("no prices for {id}: showing token counts"));
                         }
-                        Err(e) => ui.notice(&format!("error: {e}")),
+                        None
                     }
+                    ("new", "") => {
+                        let (cfg, model, cwd) = (s.cfg.clone(), s.model.clone(), s.cwd.clone());
+                        match Session::new(cfg, model, cwd, false) {
+                            Ok(n) => {
+                                s = n;
+                                if let Some(e) = editor.as_mut() {
+                                    e.set_helper(Some(Commands::of(&s)));
+                                }
+                                greet(&mut ui, &s);
+                            }
+                            Err(e) => ui.notice(&format!("error: {e}")),
+                        }
+                        None
+                    }
+                    ("skills", "") => {
+                        list_skills(&mut ui, &s);
+                        None
+                    }
+                    _ if COMMANDS.contains(&name) => {
+                        ui.notice(HELP);
+                        None
+                    }
+                    _ => match skill_task(&mut s, &line) {
+                        Some(Ok(msg)) => {
+                            ui.notice(&format!("skill: {name}"));
+                            Some(msg)
+                        }
+                        Some(Err(e)) => {
+                            ui.notice(&format!("error: {e}"));
+                            None
+                        }
+                        None => {
+                            ui.notice(HELP);
+                            None
+                        }
+                    },
+                };
+                match task {
+                    Some(task) => task,
+                    None => continue,
                 }
-                _ => ui.notice("commands: /model <id>, /new"),
             }
-            continue;
-        }
+        };
         let cancel = Cancel::default();
         set_current(Some(cancel.clone()));
-        let end = s.run(&line, &cancel, &mut |ev| ui.event(ev)).await;
+        let end = s.run(&task, &cancel, &mut |ev| ui.event(ev)).await;
         set_current(None);
         match end {
             RunEnd::Done(_) => {}
             RunEnd::Interrupted => ui.notice("interrupted"),
             RunEnd::Budget(m) | RunEnd::Error(m) => ui.notice(&format!("error: {m}")),
         }
+    }
+}
+
+fn list_skills(ui: &mut Ui, s: &Session) {
+    if s.skills.is_empty() {
+        ui.notice("no skills found");
+    }
+    for k in &s.skills {
+        let mut desc = k.description.split_whitespace().collect::<Vec<_>>().join(" ");
+        if desc.chars().count() > 100 {
+            desc = desc.chars().take(99).chain(['…']).collect();
+        }
+        let only = if k.user_only { " (only with /name)" } else { "" };
+        ui.notice(&format!("/{}{only}: {desc}", k.name));
     }
 }
 

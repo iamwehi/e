@@ -301,24 +301,41 @@ fn sanitizer_strips_escapes_and_controls() {
 #[test]
 fn skills_frontmatter_and_prompt() {
     let d = tempdir("skills");
-    let sk = d.join(".e/skills/reentrancy");
+    let root = d.join(".e/skills");
+    let sk = root.join("reentrancy");
     std::fs::create_dir_all(&sk).unwrap();
     std::fs::write(
         sk.join("SKILL.md"),
         "---\nname: reentrancy\ndescription: \"Checks for reentrancy\"\n---\nbody",
     )
     .unwrap();
-    std::fs::create_dir_all(d.join(".e/skills/broken")).unwrap();
-    std::fs::write(d.join(".e/skills/broken/SKILL.md"), "no frontmatter").unwrap();
-    let (p, warnings) = e::prompt::build(&d, "2026-11-11");
-    assert!(p.contains(&format!("reentrancy: Checks for reentrancy ({})", sk.join("SKILL.md").display())));
+    std::fs::create_dir_all(root.join("broken")).unwrap();
+    std::fs::write(root.join("broken/SKILL.md"), "no frontmatter").unwrap();
+    let mut warnings = Vec::new();
+    let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    warnings.extend(more);
+    assert!(p.contains(&format!(
+        "<skill>\n<name>reentrancy</name>\n<description>Checks for reentrancy</description>\n\
+         <location>{}</location>\n</skill>",
+        sk.join("SKILL.md").display()
+    )));
+    assert!(p.contains("relative to its directory"));
     assert!(p.contains("Date: 2026-11-11") && p.contains(&format!("Working directory: {}", d.display())));
     assert!(warnings.iter().any(|w| w.contains("AUDIT.md")));
     assert!(warnings.iter().any(|w| w.contains("broken")));
     std::fs::write(d.join(".e/AUDIT.md"), "Scope: src/\n").unwrap();
-    let (p, warnings) = e::prompt::build(&d, "2026-11-11");
-    assert!(p.ends_with("<audit_brief>\nScope: src/\n</audit_brief>"));
+    let mut warnings = Vec::new();
+    let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    warnings.extend(more);
+    assert!(p.ends_with("</available_skills>\n\n<audit_brief>\nScope: src/\n</audit_brief>"));
     assert!(!warnings.iter().any(|w| w.contains("AUDIT.md")));
+
+    // No skills: no catalog and no instructions about skills.
+    let (p, _) = e::prompt::build(&d, "2026-11-11", &[]);
+    assert!(!p.contains("available_skills") && !p.contains("SKILL.md"));
+    assert!(p.contains("Date: 2026-11-11\n\n<audit_brief>"));
 }
 
 /// The ```toml blocks of the README, in order.

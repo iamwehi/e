@@ -11,6 +11,7 @@ pub mod editor;
 pub mod exec;
 pub mod prompt;
 pub mod provider;
+pub mod skills;
 pub mod term;
 pub mod tools;
 pub mod transcript;
