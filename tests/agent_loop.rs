@@ -235,3 +235,55 @@ async fn truncated_reply_does_not_execute_tool_calls() {
     assert!(!s.cwd.join("ran").exists());
     history_is_valid(&s.history).unwrap();
 }
+
+#[tokio::test]
+async fn parallel_calls_sharing_a_stream_index_stay_separate() {
+    // Venice may number the turn, not the call: every call has index 0 and only ids differ.
+    let delta =
+        |tc: Value| json!({"choices": [{"index": 0, "delta": {"tool_calls": [tc]}, "finish_reason": null}]});
+    let ev = vec![
+        json!({"choices": [{"index": 0, "delta": {"reasoning_content": "two reads"}, "finish_reason": null}]}),
+        delta(
+            json!({"index": 0, "id": "c1", "type": "function", "function": {"name": "write", "arguments": "{\"path\": \"a\","}}),
+        ),
+        delta(json!({"index": 0, "function": {"arguments": " \"content\": \"A\"}"}})),
+        delta(
+            json!({"index": 0, "id": "c2", "type": "function", "function": {"name": "write", "arguments": "{\"path\": \"b\","}}),
+        ),
+        delta(json!({"index": 0, "id": "c2", "function": {"arguments": " \"content\": \"B\"}"}})),
+        json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}], "usage": usage(10, 5)}),
+    ];
+    let m = mock(vec![Resp::Sse(ev), text_reply("ok", usage(20, 5))]).await;
+    let mut s = session(&m.url, "sameindex");
+    assert_eq!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Done("ok".into()));
+    let Message::Assistant { tool_calls, .. } = &s.history[1] else { panic!() };
+    let ids: Vec<&str> = tool_calls.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c2"]);
+    assert_eq!(std::fs::read_to_string(s.cwd.join("a")).unwrap(), "A");
+    assert_eq!(std::fs::read_to_string(s.cwd.join("b")).unwrap(), "B");
+    check_request(&m.requests.lock().unwrap()[1]);
+}
+
+#[tokio::test]
+async fn in_band_errors_are_retried_only_before_the_reply_starts() {
+    let timeout = json!({"error": {"message": "timed out before first chunk", "code": "REQUEST_TIMEOUT"}});
+    let m = mock(vec![Resp::Sse(vec![timeout.clone()]), text_reply("ok", usage(1, 1))]).await;
+    let mut s = session(&m.url, "inband");
+    assert_eq!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Done("ok".into()));
+    assert_eq!(m.requests.lock().unwrap().len(), 2);
+
+    // After visible output, a retry would duplicate it: fail instead.
+    let partial = json!({"choices": [{"index": 0, "delta": {"content": "half"}, "finish_reason": null}]});
+    let m = mock(vec![Resp::Sse(vec![partial, timeout]), text_reply("never", usage(1, 1))]).await;
+    let mut s = session(&m.url, "inband-late");
+    let end = s.run("x", &Cancel::default(), &mut |_| {}).await;
+    assert!(matches!(&end, RunEnd::Error(e) if e.contains("REQUEST_TIMEOUT")), "{end:?}");
+    assert_eq!(m.requests.lock().unwrap().len(), 1);
+
+    // A request the API rejects as invalid is not retried.
+    let bad = json!({"error": {"type": "invalid_request_error", "code": "context_length_exceeded", "message": "too long"}});
+    let m = mock(vec![Resp::Sse(vec![bad]), text_reply("never", usage(1, 1))]).await;
+    let mut s = session(&m.url, "inband-bad");
+    assert!(matches!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Error(_)));
+    assert_eq!(m.requests.lock().unwrap().len(), 1);
+}

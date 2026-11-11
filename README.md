@@ -63,10 +63,15 @@ defaults:
 }
 ```
 
-The built-in price table also covers Venice's other DeepSeek V4 models.
-Prices are USD per 1M tokens: `hit` for cached prompt tokens, `miss` for the
-rest, `output` for completion tokens (reasoning included). A model without
-prices shows token counts instead of a cost. `extra_body` is merged into every
+The built-in price table also covers Venice's other DeepSeek V4 models
+(`deepseek-v4-1-flash*`, `deepseek-v4-flash*`, `deepseek-v4-pro*` and their
+`e2ee-` variants). Prices are USD per 1M tokens: `hit` for prompt tokens read
+from the cache, `miss` for the rest, `output` for completion tokens (reasoning
+included), and an optional `write` for tokens written to the cache by models
+that charge a premium for it (otherwise they cost `miss`). Extended-context
+price tiers are not modelled. A model without prices shows token counts
+instead of a cost; the table is keyed by model id only, so set `prices`
+whenever you change `base_url`. `extra_body` is merged into every
 request; the default stops Venice from adding its own system prompt.
 `prompt_cache_key` sends a per-session key so requests reach a warm cache.
 
@@ -82,7 +87,11 @@ To use DeepSeek's own API instead:
   "peak_hours_utc": [[1, 4], [6, 10]],
   "prices": {
     "deepseek-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
-                       "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}}
+                       "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}},
+    "deepseek-v4-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
+                          "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}},
+    "deepseek-v4-pro": {"hit": 0.044, "miss": 1.32, "output": 3.96,
+                        "off_peak": {"hit": 0.022, "miss": 0.66, "output": 1.98}}
   }
 }
 ```

@@ -5,12 +5,15 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// USD per 1M tokens.
+/// USD per 1M tokens. `write` is for prompt tokens written to the cache
+/// (some Venice models charge a premium); absent, they cost `miss`.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq)]
 pub struct Rate {
     pub hit: f64,
     pub miss: f64,
     pub output: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -50,15 +53,22 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         // Venice prices from GET /models on 2026-11-11: input (cache miss),
-        // cache_input (cache hit) and output, USD per 1M tokens.
-        let rate = |miss, hit, output| Prices { peak: Rate { hit, miss, output }, off_peak: None };
+        // cache_input (cache hit) and output, USD per 1M tokens. None of these
+        // models has a cache_write price or an extended-context tier.
+        let rate =
+            |miss, hit, output| Prices { peak: Rate { hit, miss, output, write: None }, off_peak: None };
         let mut prices = BTreeMap::new();
         for (model, p) in [
             ("deepseek-v4-1-flash", rate(0.3, 0.0075, 1.2)),
             ("deepseek-v4-1-flash-1017", rate(0.3, 0.0075, 1.2)),
             ("deepseek-v4-1-flash-uncensored", rate(0.33, 0.00825, 1.32)),
             ("deepseek-v4-1-flash-1017-uncensored", rate(0.33, 0.00825, 1.32)),
+            ("deepseek-v4-1-flash-1017-ultrafast", rate(3.0, 0.06, 12.0)),
             ("deepseek-v4-flash", rate(0.138, 0.028, 0.275)),
+            ("deepseek-v4-flash-0731", rate(0.13, 0.028, 0.26)),
+            ("deepseek-v4-flash-0731-fast", rate(0.35, 0.0875, 0.7)),
+            ("e2ee-deepseek-v4-flash", rate(0.182, 0.038, 0.373)),
+            ("e2ee-deepseek-v4-1-flash-1017-abliterated", rate(0.375, 0.0075, 1.5)),
             ("deepseek-v4-pro", rate(1.65, 0.33, 3.301)),
             ("deepseek-v4-pro-0813", rate(1.65, 0.165, 4.95)),
         ] {
@@ -133,9 +143,11 @@ impl Config {
             Some(off) if !self.is_peak(unix) => off,
             _ => p.peak,
         };
-        let (hit, miss) = u.hit_miss();
-        let micro =
-            hit as f64 * rate.hit + miss as f64 * rate.miss + u.completion_tokens as f64 * rate.output;
+        let (hit, write, miss) = u.split();
+        let micro = hit as f64 * rate.hit
+            + write as f64 * rate.write.unwrap_or(rate.miss)
+            + miss as f64 * rate.miss
+            + u.completion_tokens as f64 * rate.output;
         Some(micro / 1_000_000.0)
     }
 }
@@ -161,21 +173,20 @@ pub struct Usage {
 pub struct PromptDetails {
     #[serde(default)]
     pub cached_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u64>,
 }
 
 impl Usage {
-    /// Prompt tokens served from cache and not, in that order.
-    pub fn hit_miss(&self) -> (u64, u64) {
+    /// Prompt tokens read from cache, written to cache, and neither.
+    pub fn split(&self) -> (u64, u64, u64) {
         if let (Some(hit), Some(miss)) = (self.prompt_cache_hit_tokens, self.prompt_cache_miss_tokens) {
-            return (hit, miss);
+            return (hit, 0, miss);
         }
-        let hit = self
-            .prompt_tokens_details
-            .and_then(|d| d.cached_tokens)
-            .or(self.prompt_cache_hit_tokens)
-            .unwrap_or(0)
-            .min(self.prompt_tokens);
-        (hit, self.prompt_tokens - hit)
+        let details = self.prompt_tokens_details.unwrap_or_default();
+        let hit = details.cached_tokens.or(self.prompt_cache_hit_tokens).unwrap_or(0).min(self.prompt_tokens);
+        let write = details.cache_creation_input_tokens.unwrap_or(0).min(self.prompt_tokens - hit);
+        (hit, write, self.prompt_tokens - hit - write)
     }
 
     pub fn total(&self) -> u64 {

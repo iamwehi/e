@@ -229,14 +229,24 @@ fn cost_uses_cache_hit_miss_and_output_prices() {
     let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
     // Venice: 1M cached, 2M uncached, 0.5M output; prices have no peak hours.
     let u = venice_usage(3_000_000, 1_000_000, 500_000);
-    assert_eq!(u.hit_miss(), (1_000_000, 2_000_000));
+    assert_eq!(u.split(), (1_000_000, 0, 2_000_000));
     assert!(close(cfg.cost("deepseek-v4-1-flash", &u, 0).unwrap(), 0.0075 + 0.6 + 0.6));
     assert!(close(cfg.cost("deepseek-v4-pro", &u, 0).unwrap(), 0.33 + 3.3 + 1.6505));
     assert_eq!(cfg.cost("other-model", &u, 0), None);
     // No cache details at all: every prompt token is a miss.
     let plain: Usage =
         serde_json::from_value(json!({"prompt_tokens": 1000, "completion_tokens": 10})).unwrap();
-    assert_eq!(plain.hit_miss(), (0, 1000));
+    assert_eq!(plain.split(), (0, 0, 1000));
+    // Cache writes are charged at `write` when a model has it, else at `miss`.
+    let w: Usage = serde_json::from_value(json!({"prompt_tokens": 1_000_000, "completion_tokens": 0,
+        "prompt_tokens_details": {"cached_tokens": 200_000, "cache_creation_input_tokens": 500_000}}))
+    .unwrap();
+    assert_eq!(w.split(), (200_000, 500_000, 300_000));
+    let claude: Config = serde_json::from_value(json!({"prices": {
+        "m": {"hit": 0.5, "miss": 5.0, "output": 25.0, "write": 6.25}, "n": {"hit": 0.5, "miss": 5.0, "output": 25.0}}}))
+    .unwrap();
+    assert!(close(claude.cost("m", &w, 0).unwrap(), 0.1 + 3.125 + 1.5));
+    assert!(close(claude.cost("n", &w, 0).unwrap(), 0.1 + 2.5 + 1.5));
 
     // DeepSeek's own API: hit/miss fields and peak/off-peak prices by config.
     let ds: Config = serde_json::from_value(json!({
