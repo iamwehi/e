@@ -331,3 +331,204 @@ async fn in_band_errors_are_retried_only_before_the_reply_starts() {
     assert!(matches!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Error(_)));
     assert_eq!(m.requests.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn tool_calls_without_an_id_get_a_generated_one() {
+    let ev = vec![
+        delta(json!({"reasoning_content": "r"})),
+        delta(json!({"tool_calls": [{"index": 0, "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\": \"echo one\"}"}}]})),
+        delta(json!({"tool_calls": [{"index": 1, "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\": \"echo two\"}"}}]})),
+        finish("tool_calls", usage(10, 5)),
+    ];
+    let m = mock(vec![Resp::Sse(ev), text_reply("ok", usage(20, 5))]).await;
+    let mut s = session(&m.url, "noid");
+    assert_eq!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Done("ok".into()));
+    let Message::Assistant { tool_calls, .. } = &s.history[1] else { panic!() };
+    let ids: Vec<&str> = tool_calls.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["call_e_0_0", "call_e_0_1"]);
+    let Message::Tool { tool_call_id, content } = &s.history[3] else { panic!() };
+    assert_eq!(tool_call_id, "call_e_0_1");
+    assert!(content.starts_with("two\n"));
+    check_request(&m.requests.lock().unwrap()[1]);
+}
+
+#[tokio::test]
+async fn replies_that_stop_for_other_reasons_are_errors() {
+    for (reason, want) in [("length", "output token limit"), ("content_filter", "\"content_filter\"")] {
+        let ev = vec![delta(json!({"content": "partial"})), finish(reason, usage(10, 5))];
+        let m = mock(vec![Resp::Sse(ev)]).await;
+        let mut s = session(&m.url, "finish");
+        let end = s.run("x", &Cancel::default(), &mut |_| {}).await;
+        assert!(matches!(&end, RunEnd::Error(e) if e.contains(want)), "{reason}: {end:?}");
+        assert_eq!(end.exit_code(), 1);
+        // The partial reply is kept, so the next request is still valid.
+        let Some(Message::Assistant { content, .. }) = s.history.last() else { panic!() };
+        assert_eq!(content, "partial");
+        history_is_valid(&s.history).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_cancelled_run_sends_no_request() {
+    let m = mock(vec![]).await;
+    let mut s = session(&m.url, "precancel");
+    let cancel = Cancel::default();
+    cancel.cancel();
+    assert_eq!(s.run("x", &cancel, &mut |_| {}).await, RunEnd::Interrupted);
+    assert!(m.requests.lock().unwrap().is_empty());
+    assert_eq!(s.history, [Message::User { content: "x".into() }]);
+    let log = std::fs::read_to_string(s.transcript.dir.join("transcript.jsonl")).unwrap();
+    assert!(log.contains("\"status\":\"interrupted\""), "{log}");
+}
+
+#[tokio::test]
+async fn optional_request_fields_follow_the_config() {
+    let m = mock(vec![text_reply("ok", usage(1, 1))]).await;
+    let cfg = e::config::Config::from_toml(&format!(
+        r#"
+        base_url = "{}"
+        api_key = "k"
+        api_key_env = "E_TEST_UNSET_KEY"
+        max_tokens = 1234
+        reasoning_effort = "high"
+        prompt_cache_key = false
+        [extra_body]
+        temperature = 0.5
+        stream_options = {{ include_usage = true, extra = 1 }}
+        "#,
+        m.url
+    ))
+    .unwrap();
+    let mut s = Session::new(cfg, "deepseek-v4-pro".into(), tempdir("fields"), false).unwrap();
+    s.run("x", &Cancel::default(), &mut |_| {}).await;
+    let r = m.requests.lock().unwrap()[0].clone();
+    assert_eq!(r["max_tokens"], 1234);
+    assert_eq!(r["reasoning_effort"], "high");
+    assert_eq!(r["temperature"], 0.5);
+    assert_eq!(r["stream"], true);
+    assert_eq!(r["stream_options"], json!({"include_usage": true, "extra": 1}), "extra_body wins");
+    assert!(r.get("prompt_cache_key").is_none() && r.get("venice_parameters").is_none());
+
+    // Unset: not sent at all.
+    let m = mock(vec![text_reply("ok", usage(1, 1))]).await;
+    let mut s = session(&m.url, "fields-default");
+    s.run("x", &Cancel::default(), &mut |_| {}).await;
+    let r = m.requests.lock().unwrap()[0].clone();
+    assert!(r.get("max_tokens").is_none() && r.get("reasoning_effort").is_none());
+}
+
+#[tokio::test]
+async fn history_carries_over_between_runs_of_a_session() {
+    let m = mock(vec![
+        text_reply("first answer", usage(100, 10)),
+        Resp::Sse(vec![
+            delta(json!({"content": "no usage reported"})),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        ]),
+    ])
+    .await;
+    let mut s = session(&m.url, "multi");
+    s.run("one", &Cancel::default(), &mut |_| {}).await;
+    assert_eq!(s.context_tokens, 110);
+    let cost = s.meter.cost;
+    s.run("two", &Cancel::default(), &mut |_| {}).await;
+    assert_eq!(s.context_tokens, 110, "kept when a response has no usage");
+    assert_eq!(s.meter.cost, cost);
+    let reqs = m.requests.lock().unwrap().clone();
+    let msgs = reqs[1]["messages"].as_array().unwrap();
+    let roles: Vec<&str> = msgs.iter().map(|m| m["role"].as_str().unwrap()).collect();
+    assert_eq!(roles, ["system", "user", "assistant", "user"]);
+    assert_eq!(msgs[2]["content"], "first answer");
+    assert_eq!(msgs[2]["reasoning_content"], "thinking done");
+    // The first request is a prefix of the second (prompt caching).
+    assert_eq!(reqs[0]["messages"].as_array().unwrap()[..], msgs[..2]);
+}
+
+#[tokio::test]
+async fn events_arrive_in_order_and_tool_logs_are_numbered() {
+    let m = mock(vec![
+        tool_reply(&[("c1", "bash", json!({"command": "echo a"}))], usage(10, 5)),
+        tool_reply(
+            &[("c2", "bash", json!({"command": "echo b"})), ("c3", "read", json!({"path": "missing"}))],
+            usage(20, 5),
+        ),
+        text_reply("fin", usage(30, 5)),
+    ])
+    .await;
+    let mut s = session(&m.url, "events");
+    let mut log = Vec::new();
+    s.run("x", &Cancel::default(), &mut |ev| {
+        use e::agent::Event;
+        match ev {
+            Event::Text(t) if !t.is_empty() => log.push(format!("text {t}")),
+            Event::Reasoning(_) | Event::Text(_) => {}
+            Event::TurnEnd => log.push("turn".into()),
+            Event::ToolStart { name, cost, .. } => {
+                assert!(cost.starts_with('$'));
+                log.push(format!("start {name}"))
+            }
+            Event::ToolEnd { summary, is_error, .. } => log.push(format!(
+                "end {}{}",
+                if is_error { "!" } else { "" },
+                summary.split(' ').next().unwrap()
+            )),
+            Event::Notice(n) => log.push(format!("notice {n}")),
+        }
+    })
+    .await;
+    assert_eq!(
+        log,
+        [
+            "turn",
+            "start bash",
+            "end exit",
+            "turn",
+            "start bash",
+            "end exit",
+            "start read",
+            "end !error:",
+            "text f",
+            "text in",
+            "turn"
+        ]
+    );
+    let bash = s.transcript.dir.join("bash");
+    assert_eq!(std::fs::read_to_string(bash.join("0001.log")).unwrap(), "a\n");
+    assert_eq!(std::fs::read_to_string(bash.join("0002.log")).unwrap(), "b\n");
+    assert!(!bash.join("0003.log").exists(), "read writes no log");
+}
+
+#[tokio::test]
+async fn a_finding_from_the_model_is_proven_by_the_harness() {
+    let m = mock(vec![
+        tool_reply(
+            &[("c1", "write", json!({"path": "poc.sh", "content": "test \"$(cat state)\" = drained\n"}))],
+            usage(10, 5),
+        ),
+        tool_reply(&[("c2", "bash", json!({"command": "echo drained > state"}))], usage(20, 5)),
+        tool_reply(
+            &[(
+                "c3",
+                "finding",
+                json!({"title": "Drain", "severity": "critical", "class": "logic", "file": "V.sol",
+                       "function": "withdraw", "lines": "1-2", "description": "d", "attack_path": "a",
+                       "impact": "i", "poc_cmd": "bash poc.sh", "status": "proven"}),
+            )],
+            usage(30, 5),
+        ),
+        text_reply("found one", usage(40, 5)),
+    ])
+    .await;
+    let mut s = session(&m.url, "e2e-finding");
+    assert_eq!(s.run("audit", &Cancel::default(), &mut |_| {}).await, RunEnd::Done("found one".into()));
+    let rec: Value =
+        serde_json::from_str(&std::fs::read_to_string(s.cwd.join(".e/findings/F-001.json")).unwrap())
+            .unwrap();
+    assert_eq!(rec["status"], "proven");
+    assert_eq!(rec["run_dir"], json!(s.transcript.dir));
+    assert_eq!(rec["poc"]["log"], json!(s.transcript.dir.join("poc/F-001-0003.log")));
+    let Message::Tool { content, .. } = &s.history[6] else { panic!() };
+    assert!(content.starts_with("Recorded finding F-001") && content.contains("Status: proven"));
+}

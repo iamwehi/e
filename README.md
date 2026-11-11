@@ -133,7 +133,13 @@ cargo test
 cargo build --release && python3 scripts/pty_check.py
 ```
 
-CI (`.github/workflows/checks.yml`) runs these on every pull request and tag:
+Every test runs against a scripted mock of the API on 127.0.0.1 and needs no
+key or network. `tests/cli.rs` runs the `e` binary end to end (headless,
+`--json`, the prompt over a pipe, config lookup, exit codes and signals);
+`scripts/pty_check.py` covers what needs a real terminal.
+
+CI (`.github/workflows/checks.yml`) runs both, and these, on every pull
+request and tag:
 
 ```bash
 cargo fmt --all --check
