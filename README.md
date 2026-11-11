@@ -132,3 +132,19 @@ cargo test
 ```bash
 cargo build --release && python3 scripts/pty_check.py
 ```
+
+CI (`.github/workflows/checks.yml`) runs these on every pull request and tag:
+
+```bash
+cargo fmt --all --check
+```
+
+```bash
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+```bash
+cargo deny --locked check
+```
+
+`deny.toml` holds the licence allow list and denies every RustSec advisory.
