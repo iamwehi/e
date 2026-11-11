@@ -104,9 +104,21 @@ async fn config_can_point_at_deepseek_instead() {
 #[tokio::test]
 async fn extended_cache_retention_is_sent_only_for_supported_models() {
     let cfg = config("http://127.0.0.1:1");
-    assert_eq!(cfg.cache_retention("openai-gpt-55"), Some("extended"));
-    assert_eq!(cfg.cache_retention("openai-gpt-6-sol"), Some("extended"));
-    assert_eq!(cfg.cache_retention("openai-gpt-oss-120b"), None);
+    for m in ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"] {
+        assert_eq!(cfg.cache_retention(m), Some("extended"), "{m}");
+    }
+    // Not on OpenAI's extended-retention list, GPT-5.6+ (uses prompt_cache_options), open-weight.
+    for m in [
+        "openai-gpt-54-mini",
+        "openai-gpt-54-pro",
+        "openai-gpt-53-codex",
+        "openai-gpt-56-sol",
+        "openai-gpt-6-sol",
+        "openai-gpt-oss-120b",
+        "openai-gpt-4o-2024-11-20",
+    ] {
+        assert_eq!(cfg.cache_retention(m), None, "{m}");
+    }
     assert_eq!(cfg.cache_retention("deepseek-v4-1-flash"), None);
     let off = e::config::Config { prompt_cache_retention: None, ..cfg.clone() };
     assert_eq!(off.cache_retention("openai-gpt-55"), None);

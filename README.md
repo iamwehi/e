@@ -52,7 +52,7 @@ defaults:
   "extra_body": {"venice_parameters": {"include_venice_system_prompt": false}},
   "prompt_cache_key": true,
   "prompt_cache_retention": "extended",
-  "prompt_cache_retention_models": ["openai-gpt-5", "openai-gpt-6"],
+  "prompt_cache_retention_models": ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"],
   "context_budget": 300000,
   "bash_timeout_s": 120,
   "poc_timeout_s": 600,
@@ -80,11 +80,12 @@ request; the default stops Venice from adding its own system prompt.
 Prompt caching is the provider's: `e` only keeps every request a stable
 prefix of the next. Caches expire after a few idle minutes (about 5 for
 DeepSeek models on Venice), so a long build or PoC run can cost one uncached
-turn. `prompt_cache_retention` is sent only for models whose id starts with
-one of `prompt_cache_retention_models`: Venice honours `"extended"` (24 hours)
-only on the models it serves from OpenAI and ignores it elsewhere, so it has
-no effect on the default model. Set `prompt_cache_retention` to `null` to
-never send it.
+turn. `prompt_cache_retention` is sent only for the model ids listed in
+`prompt_cache_retention_models`. Venice forwards `"extended"` (24 hours) to
+OpenAI and other models ignore it; OpenAI honours it only on GPT-5.5, 5.5 Pro,
+5.4 and 5.2 among the models Venice serves (GPT-5.6 and later control cache
+lifetime differently). It has no effect on the default model. Set
+`prompt_cache_retention` to `null` to never send it.
 
 To use DeepSeek's own API instead:
 
