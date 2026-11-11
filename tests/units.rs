@@ -142,52 +142,10 @@ fn tool_arguments_are_summarized_on_one_short_line() {
 }
 
 #[test]
-fn frontmatter_parsing() {
-    use e::prompt::parse_frontmatter;
-    let p = |s: &str| parse_frontmatter(s);
-    let some = |a: &str, b: &str| (Some(a.to_string()), Some(b.to_string()));
-    assert_eq!(p("---\nname: a\ndescription: b\n---\nbody"), some("a", "b"));
-    assert_eq!(p("---  \n name : 'a'\ndescription: \"b: with colon\"\n---"), some("a", "b: with colon"));
-    assert_eq!(p("---\nname: a\n---\ndescription: outside"), (Some("a".into()), None));
-    assert_eq!(p("---\nname:\ndescription: b\n"), (None, Some("b".into())), "empty values are absent");
-    assert_eq!(p("\n---\nname: a\ndescription: b\n---"), (None, None), "must start the file");
-    assert_eq!(p("name: a\ndescription: b"), (None, None));
-    assert_eq!(p(""), (None, None));
-}
-
-fn skill(dir: &Path, folder: &str, name: &str, desc: &str) {
-    std::fs::create_dir_all(dir.join(folder)).unwrap();
-    std::fs::write(
-        dir.join(folder).join("SKILL.md"),
-        format!("---\nname: {name}\ndescription: {desc}\n---\n"),
-    )
-    .unwrap();
-}
-
-#[test]
-fn skills_from_the_project_win_over_global_ones() {
-    let d = tempdir("skill-dirs");
-    let (local, global) = (d.join("local"), d.join("global"));
-    skill(&local, "z", "zeta", "local zeta");
-    skill(&local, "o", "oracle", "local oracle");
-    skill(&global, "o2", "oracle", "global oracle");
-    skill(&global, "a", "alpha", "global alpha");
-    std::fs::create_dir_all(local.join("no-skill-file")).unwrap();
-    std::fs::write(local.join("stray.txt"), "x").unwrap();
-    let mut warnings = Vec::new();
-    let dirs = [local.clone(), d.join("missing"), global.clone()];
-    let skills = e::prompt::discover_skills(&dirs, &mut warnings);
-    let got: Vec<(&str, &str)> = skills.iter().map(|s| (s.name.as_str(), s.description.as_str())).collect();
-    assert_eq!(got, [("alpha", "global alpha"), ("oracle", "local oracle"), ("zeta", "local zeta")]);
-    assert_eq!(skills[1].path, local.join("o/SKILL.md"));
-    assert!(warnings.is_empty(), "folders without SKILL.md are skipped silently: {warnings:?}");
-}
-
-#[test]
-fn prompt_without_skills_or_brief_says_so() {
+fn prompt_without_skills_or_brief() {
     let d = tempdir("bare-prompt");
-    let (p, warnings) = e::prompt::build(&d, "2026-01-02");
-    // (Global skills depend on $HOME here; the CLI tests check "(none)" with an isolated one.)
+    let (p, warnings) = e::prompt::build(&d, "2026-01-02", &[]);
+    assert!(!p.contains("available_skills"), "no skills, no catalog");
     assert!(p.ends_with("<audit_brief>\n(no audit brief provided)\n</audit_brief>"));
     assert!(p.contains("Date: 2026-01-02"));
     assert!(!p.contains("{cwd}") && !p.contains("{date}") && !p.contains("{contents of"));
@@ -195,8 +153,8 @@ fn prompt_without_skills_or_brief_says_so() {
     // The brief is trimmed and the prompt is deterministic.
     std::fs::create_dir_all(d.join(".e")).unwrap();
     std::fs::write(d.join(".e/AUDIT.md"), "\n\n  Scope: all  \n\n").unwrap();
-    let (a, _) = e::prompt::build(&d, "2026-01-02");
-    let (b, _) = e::prompt::build(&d, "2026-01-02");
+    let (a, _) = e::prompt::build(&d, "2026-01-02", &[]);
+    let (b, _) = e::prompt::build(&d, "2026-01-02", &[]);
     assert_eq!(a, b);
     assert!(a.ends_with("<audit_brief>\nScope: all\n</audit_brief>"));
 }

@@ -157,8 +157,14 @@ async fn headless_audit_proves_a_finding_end_to_end() {
     let system = reqs[0]["messages"][0]["content"].as_str().unwrap();
     assert!(system.contains(&format!("Working directory: {}", env.proj.display())));
     assert!(system.contains("<audit_brief>\nScope: src/Vault.sol\nOwner is trusted.\n</audit_brief>"));
-    assert!(system.contains(&format!("reentrancy: CEI checklist ({})", skills.join("SKILL.md").display())));
-    assert!(system.contains(&format!("foundry: forge recipes ({})", global.join("SKILL.md").display())));
+    for (name, desc, dir) in [("foundry", "forge recipes", &global), ("reentrancy", "CEI checklist", &skills)]
+    {
+        let entry = format!(
+            "<skill>\n<name>{name}</name>\n<description>{desc}</description>\n<location>{}</location>\n</skill>",
+            dir.join("SKILL.md").display()
+        );
+        assert!(system.contains(&entry), "missing {entry} in {system}");
+    }
     assert_eq!(reqs[0]["messages"][1], json!({"role": "user", "content": "Audit the vault"}));
     let read_result = reqs[1]["messages"][3]["content"].as_str().unwrap();
     assert_eq!(read_result, "     1\tcontract Vault {\n     2\t  // no reentrancy guard\n     3\t}\n");
@@ -247,9 +253,9 @@ async fn verbose_headless_shows_reasoning_and_tool_output_on_stderr() {
     let env = project("quiet", &m.url, "");
     let o = run(e_cmd(&env, &["-p", "go"])).await;
     assert!(!o.stderr.contains("thinking") && !o.stderr.contains("tool-output\n"), "{}", o.stderr);
-    // With no skills anywhere, the prompt says so.
+    // With no skills anywhere, the prompt has no skills section.
     let system = m.requests.lock().unwrap()[0]["messages"][0]["content"].as_str().unwrap().to_string();
-    assert!(system.contains("<skills>\n(none)\n</skills>"), "{system}");
+    assert!(!system.contains("available_skills"), "{system}");
 }
 
 #[tokio::test]
@@ -458,13 +464,20 @@ async fn interactive_commands_over_a_pipe() {
         text_reply("reply one", usage(100, 10)),
         text_reply("reply two", usage(200, 10)),
         text_reply("reply three", usage(50, 10)),
+        text_reply("hunted", usage(60, 10)),
         Resp::Status(400, "rejected".into()),
         text_reply("still here", usage(50, 10)),
     ])
     .await;
     let env = project("interactive", &m.url, "");
-    let input =
-        "first\n/model other-model\n/model\n  second  \n\n/new\nthird\n/bogus\n/model a b\nfourth\nfifth\n";
+    let hunt = env.proj.join(".e/skills/hunt");
+    std::fs::create_dir_all(&hunt).unwrap();
+    std::fs::write(
+        hunt.join("SKILL.md"),
+        "---\nname: hunt\ndescription: hunt bugs\n---\nLook for reentrancy.\n",
+    )
+    .unwrap();
+    let input = "first\n/model other-model\n/model\n  second  \n\n/new\nthird\n/skills\n/hunt in Vault.sol\n/bogus\n/model a b\nfourth\nfifth\n";
     let o = interactive(&env, input).await;
     assert_eq!(o.code, Some(0), "EOF exits 0: {}", o.stderr);
     assert!(!o.stdout.contains('\u{1b}'), "no colour on a pipe");
@@ -479,7 +492,10 @@ async fn interactive_commands_over_a_pipe() {
         "reply two\n",
         "[e · other-model · ",
         "reply three\n",
-        "[commands: /model <id>, /new]\n",
+        "[/hunt: hunt bugs]\n",
+        "[skill: hunt]\n",
+        "hunted\n",
+        "[commands: /model <id>, /new, /skills, /<skill> [task]]\n",
         "[error: HTTP 400 Bad Request: rejected]\n",
         "still here\n",
     ] {
@@ -506,10 +522,18 @@ async fn interactive_commands_over_a_pipe() {
             s("deepseek-v4-1-flash", 2, "first"),
             s("other-model", 4, "second"),
             s("other-model", 2, "third"),
-            s("other-model", 4, "fourth"),
+            s("other-model", 4, &summary[3].2),
+            s("other-model", 6, "fourth"),
             // The failed run left its user message; the API accepts consecutive user messages.
-            s("other-model", 5, "fifth"),
+            s("other-model", 7, "fifth"),
         ]
+    );
+    // /hunt sends the skill's instructions with the task after its name.
+    let skill_msg = &summary[3].2;
+    assert!(
+        skill_msg.starts_with("<skill_content name=\"hunt\">\nLook for reentrancy.\n")
+            && skill_msg.ends_with("</skill_content>\n\nin Vault.sol"),
+        "{skill_msg}"
     );
     // /new starts a new transcript and a new cache key.
     assert_eq!(run_dirs(&env.proj).len(), 2);

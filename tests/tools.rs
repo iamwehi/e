@@ -301,24 +301,41 @@ fn sanitizer_strips_escapes_and_controls() {
 #[test]
 fn skills_frontmatter_and_prompt() {
     let d = tempdir("skills");
-    let sk = d.join(".e/skills/reentrancy");
+    let root = d.join(".e/skills");
+    let sk = root.join("reentrancy");
     std::fs::create_dir_all(&sk).unwrap();
     std::fs::write(
         sk.join("SKILL.md"),
         "---\nname: reentrancy\ndescription: \"Checks for reentrancy\"\n---\nbody",
     )
     .unwrap();
-    std::fs::create_dir_all(d.join(".e/skills/broken")).unwrap();
-    std::fs::write(d.join(".e/skills/broken/SKILL.md"), "no frontmatter").unwrap();
-    let (p, warnings) = e::prompt::build(&d, "2026-11-11");
-    assert!(p.contains(&format!("reentrancy: Checks for reentrancy ({})", sk.join("SKILL.md").display())));
+    std::fs::create_dir_all(root.join("broken")).unwrap();
+    std::fs::write(root.join("broken/SKILL.md"), "no frontmatter").unwrap();
+    let mut warnings = Vec::new();
+    let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    warnings.extend(more);
+    assert!(p.contains(&format!(
+        "<skill>\n<name>reentrancy</name>\n<description>Checks for reentrancy</description>\n\
+         <location>{}</location>\n</skill>",
+        sk.join("SKILL.md").display()
+    )));
+    assert!(p.contains("relative to its directory"));
     assert!(p.contains("Date: 2026-11-11") && p.contains(&format!("Working directory: {}", d.display())));
     assert!(warnings.iter().any(|w| w.contains("AUDIT.md")));
     assert!(warnings.iter().any(|w| w.contains("broken")));
     std::fs::write(d.join(".e/AUDIT.md"), "Scope: src/\n").unwrap();
-    let (p, warnings) = e::prompt::build(&d, "2026-11-11");
-    assert!(p.ends_with("<audit_brief>\nScope: src/\n</audit_brief>"));
+    let mut warnings = Vec::new();
+    let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    warnings.extend(more);
+    assert!(p.ends_with("</available_skills>\n\n<audit_brief>\nScope: src/\n</audit_brief>"));
     assert!(!warnings.iter().any(|w| w.contains("AUDIT.md")));
+
+    // No skills: no catalog and no instructions about skills.
+    let (p, _) = e::prompt::build(&d, "2026-11-11", &[]);
+    assert!(!p.contains("available_skills") && !p.contains("SKILL.md"));
+    assert!(p.contains("Date: 2026-11-11\n\n<audit_brief>"));
 }
 
 /// The ```toml blocks of the README, in order.
@@ -352,4 +369,38 @@ fn config_rejects_unknown_keys_and_bad_toml() {
     assert!(Config::from_toml("context_budget = \"lots\"").is_err());
     // Empty file: all defaults.
     assert_eq!(Config::from_toml("").unwrap().model, Config::default().model);
+}
+
+#[test]
+fn editor_key_parses_and_rejects_bad_keys() {
+    use e::editor::parse_keys;
+    use rustyline::{KeyCode, KeyEvent, Modifiers};
+    assert_eq!(parse_keys("ctrl-x ctrl-e").unwrap(), vec![KeyEvent::ctrl('X'), KeyEvent::ctrl('E')]);
+    assert_eq!(parse_keys("Ctrl-G").unwrap(), vec![KeyEvent::ctrl('G')]);
+    assert_eq!(parse_keys("alt-e").unwrap(), vec![KeyEvent::alt('e')]);
+    assert_eq!(parse_keys("f2").unwrap(), vec![KeyEvent(KeyCode::F(2), Modifiers::NONE)]);
+    assert!(parse_keys("").unwrap().is_empty());
+    for bad in ["e", "ctrl-", "ctrl-gg", "f13", "ctrl-g ctrl-e", "ctrl-c", "ctrl-d", "shift-e"] {
+        assert!(parse_keys(bad).is_err(), "{bad}");
+    }
+    let err = Config::from_toml(r#"editor_key = "ctrl-g ctrl-e""#).err().unwrap();
+    assert!(err.contains("editor_key"), "{err}");
+    assert_eq!(Config::from_toml(r#"editor_key = "ctrl-g""#).unwrap().editor_key, "ctrl-g");
+}
+
+#[test]
+fn edit_round_trips_through_the_editor_command() {
+    let dir = tempdir("editor");
+    let script = dir.join("ed.sh");
+    std::fs::write(
+        &script,
+        "printf 'edited: ' > \"$1.new\"\ncat \"$1\" >> \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+    )
+    .unwrap();
+    // Through sh, so a command with arguments works.
+    let cmd = format!("sh {}", script.display());
+    assert_eq!(e::editor::edit(&cmd, "audit\nthe vault\n").unwrap(), "edited: audit\nthe vault");
+    assert_eq!(e::editor::edit("true", "kept\n").unwrap(), "kept");
+    let err = e::editor::edit("false", "x").err().unwrap();
+    assert!(err.contains("false exited"), "{err}");
 }
