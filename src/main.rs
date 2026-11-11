@@ -10,7 +10,8 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use std::process::ExitCode;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
 
@@ -20,7 +21,8 @@ const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
   -v, --verbose  show reasoning and full tool output
 
 Interactive commands: /model <id>, /new, /skills, /<skill> [task]. A TASK
-may also start with /<skill>. Ctrl-C cancels a run, Ctrl-D exits.
+may also start with /<skill>. Ctrl-X Ctrl-E (editor_key in the config) opens
+the prompt in $VISUAL or $EDITOR. Ctrl-C cancels a run, Ctrl-D exits.
 Provider: Venice by default (key in VENICE_API_KEY); any OpenAI-compatible
 API via config. Config: $E_CONFIG or ~/.config/e/config.toml.";
 
@@ -256,6 +258,13 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
             }
         },
     };
+    // Set by editor_key: the line was accepted only to be opened in $EDITOR.
+    let want_editor = match (editor.as_mut(), e::editor::parse_keys(&s.cfg.editor_key)) {
+        (Some(ed), Ok(keys)) => e::editor::bind(ed, keys),
+        _ => Arc::new(AtomicBool::new(false)),
+    };
+    // Text to put back at the prompt, from the editor.
+    let mut draft: Option<String> = None;
     let greet = |ui: &mut Ui, s: &Session| {
         ui.notice(&format!("e · {} · {} · log {}", s.model, s.cwd.display(), s.transcript.dir.display()));
         for w in &s.warnings {
@@ -272,9 +281,10 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
     loop {
         let prompt = format!("{} {} > ", s.model, s.meter.display());
         let mut ed = editor.take();
+        let initial = draft.take().unwrap_or_default();
         let Ok((ed, line)) = tokio::task::spawn_blocking(move || {
             let r = match ed.as_mut() {
-                Some(e) => e.readline(&prompt),
+                Some(e) => e.readline_with_initial(&prompt, (&initial, "")),
                 None => plain_readline(&prompt),
             };
             (ed, r)
@@ -284,6 +294,24 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
             return 1;
         };
         editor = ed;
+        if want_editor.swap(false, Ordering::SeqCst)
+            && let Ok(text) = &line
+        {
+            let text = text.clone();
+            draft = match tokio::task::spawn_blocking(move || {
+                (e::editor::edit(&e::editor::editor_command(), &text), text)
+            })
+            .await
+            {
+                Ok((Ok(edited), _)) => Some(edited),
+                Ok((Err(err), text)) => {
+                    ui.notice(&format!("editor: {err}; prompt unchanged"));
+                    Some(text)
+                }
+                Err(_) => return 1,
+            };
+            continue;
+        }
         let line = match line {
             Ok(l) => l.trim().to_string(),
             Err(ReadlineError::Interrupted) => continue,

@@ -12,8 +12,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The config file.
 toml = { version = "1.2", default-features = false, features = ["std", "serde", "parse"] }
-# Line editing and history at the prompt.
-rustyline = { version = "19", default-features = false }
+# Line editing and history at the prompt; custom-bindings for the $EDITOR key.
+rustyline = { version = "19", default-features = false, features = ["custom-bindings"] }
 # setsid/kill for process groups, termios save/restore, isatty.
 libc = "0.2"
 yaml-rust2 = { version = "0.13", default-features = false }
