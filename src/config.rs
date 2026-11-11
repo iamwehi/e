@@ -54,6 +54,9 @@ pub struct Config {
     /// Peak windows [start, end) in UTC hours, Monday to Friday.
     pub peak_hours_utc: Vec<[u32; 2]>,
     pub prices: BTreeMap<String, Prices>,
+    /// Key sequence at the prompt that opens it in `$VISUAL`/`$EDITOR`,
+    /// e.g. "ctrl-x ctrl-e" or "ctrl-g". Empty: no key.
+    pub editor_key: String,
 }
 
 impl Default for Config {
@@ -111,6 +114,7 @@ impl Default for Config {
             reasoning_effort: None,
             peak_hours_utc: Vec::new(),
             prices,
+            editor_key: "ctrl-x ctrl-e".into(),
         }
     }
 }
@@ -135,7 +139,9 @@ impl Config {
 
     /// Defaults, overridden key by key by the TOML in `text`.
     pub fn from_toml(text: &str) -> Result<Config, String> {
-        toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())
+        let cfg: Config = toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())?;
+        crate::editor::parse_keys(&cfg.editor_key).map_err(|e| format!("editor_key: {e}"))?;
+        Ok(cfg)
     }
 
     /// Defaults, overridden key by key by the config file if it exists.

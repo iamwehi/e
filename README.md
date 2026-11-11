@@ -22,7 +22,10 @@ e -p "Audit src/Vault.sol"            # headless: prints the final message
 e -p "Audit src/Vault.sol" --json     # headless: transcript events as JSON lines
 ```
 
-At the prompt: `/model <id>`, `/new`. Ctrl-C cancels a run, Ctrl-D exits.
+At the prompt: `/model <id>`, `/new`. Ctrl-X Ctrl-E opens the prompt in
+`$VISUAL` (else `$EDITOR`, else `vi`); when you save and quit, the text comes
+back to the prompt for Enter to send, and quitting with an error (vim's `:cq`)
+leaves the prompt as it was. Ctrl-C cancels a run, Ctrl-D exits.
 `--verbose` shows reasoning and full tool output.
 
 Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
@@ -58,6 +61,7 @@ poc_timeout_s = 600
 # max_tokens = 32_000        # unset: the provider's default
 # reasoning_effort = "high"  # unset: not sent
 peak_hours_utc = []
+editor_key = "ctrl-x ctrl-e"  # e.g. "ctrl-g", "alt-e", "f2"; "" for none
 
 [extra_body]
 venice_parameters = { include_venice_system_prompt = false }
@@ -77,7 +81,8 @@ that charge a premium for it (otherwise they cost `miss`). Extended-context
 price tiers are not modelled. A model without prices shows token counts
 instead of a cost; the table is keyed by model id only, so set `prices`
 whenever you change `base_url`. Quote model ids that contain a dot:
-`[prices."gpt-5.5"]`. `extra_body` is merged into every request; the default
+`[prices."gpt-5.5"]`. A multi-key `editor_key` must start with `ctrl-x`
+(the line editor reads further keys only after that prefix). `extra_body` is merged into every request; the default
 stops Venice from adding its own system prompt. `prompt_cache_key` sends a
 per-session key so requests reach a warm cache.
 
