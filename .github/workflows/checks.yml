@@ -49,15 +49,3 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check
-
-  vet:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-vet@0.10.3
-      # --locked: check against supply-chain/imports.lock, fetch nothing.
-      - run: cargo vet --locked

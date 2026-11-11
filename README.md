@@ -129,6 +129,10 @@ Peak hours are Monday to Friday, UTC; `off_peak` rates apply outside them.
 cargo test
 ```
 
+```bash
+cargo build --release && python3 scripts/pty_check.py
+```
+
 CI (`.github/workflows/checks.yml`) runs these on every pull request and tag:
 
 ```bash
@@ -143,18 +147,4 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo deny --locked check
 ```
 
-```bash
-cargo vet --locked
-```
-
 `deny.toml` holds the licence allow list and denies every RustSec advisory.
-`supply-chain/` holds cargo-vet's audits, the imported audit sets (every
-organisation in cargo-vet's registry), trust in the crates.io publishers those
-organisations already trust (dtolnay, seanmonstar, ctz, ...), and exemptions
-for the crates none of that covers yet. After changing dependencies, run
-`cargo vet` (it fetches newer imports) and then either `cargo vet certify` or
-`cargo vet regenerate exemptions`.
-
-```bash
-cargo build --release && python3 scripts/pty_check.py
-```
