@@ -36,7 +36,11 @@ fn spec_examples_parse_cleanly() {
     assert_eq!(p.description, "Extract PDF text, fill forms, merge files. Use when handling PDFs.");
     assert!(p.problems.is_empty(), "{:?}", p.problems);
     // Fields from other clients are not an error.
-    assert!(problems("---\nname: a\ndescription: d\ndisable-model-invocation: true\n---\n", "a").is_empty());
+    assert!(
+        problems("---\nname: a\ndescription: d\nuser-invocable: false\nargument-hint: x\n---\n", "a")
+            .is_empty()
+    );
+    assert!(problems("---\nname: a\ndescription: d\ndisable-model-invocation: false\n---\n", "a").is_empty());
 }
 
 #[test]
@@ -58,6 +62,32 @@ fn yaml_forms_other_clients_write() {
     assert!(p.problems.iter().any(|w| w.contains("invalid YAML")));
     let p = parse("---\nname: a\ndescription: it's for: Rust's borrowck\n---\n", "a").unwrap();
     assert_eq!(p.description, "it's for: Rust's borrowck");
+    // Wrapped values fold into one line, whichever line has the colon.
+    for (text, want) in [
+        (
+            "---\nname: a\ndescription: Use when: the user asks about PDFs,\n  or forms.\nlicense: MIT\n---\n",
+            "Use when: the user asks about PDFs, or forms.",
+        ),
+        (
+            "---\nname: a\ndescription: Use for PDFs,\n\tor when: forms.\r\nlicense: MIT\n---\n",
+            "Use for PDFs, or when: forms.",
+        ),
+    ] {
+        let p = parse(text, "a").unwrap();
+        assert_eq!(p.description, want);
+        assert_eq!(p.problems.len(), 1, "{:?}", p.problems);
+    }
+    // Valid lines, comments included, survive the fallback unchanged; nested values aren't touched.
+    let p = parse(
+        "---\nname: pdf # renamed from: pdf-tools\ndescription: Use when: PDFs # note: x\nmetadata:\n  version: \"1\"\n---\n",
+        "pdf",
+    )
+    .unwrap();
+    assert_eq!((p.name.as_str(), p.description.as_str()), ("pdf", "Use when: PDFs"));
+    assert_eq!(p.problems.len(), 1, "{:?}", p.problems);
+    // A tab after the colon is valid YAML 1.2 that yaml-rust2 rejects.
+    let p = parse("---\nname:\tpdf\ndescription:\tPDFs\n---\n", "pdf").unwrap();
+    assert_eq!((p.name.as_str(), p.description.as_str()), ("pdf", "PDFs"));
 }
 
 #[test]
@@ -67,7 +97,13 @@ fn unusable_skills_are_errors() {
         ("---\nname: a\ndescription: d\n", "frontmatter"),
         ("---\nname: a\n---\n", "description"),
         ("---\nname: a\ndescription: \"  \"\n---\n", "description"),
-        ("---\nname: a\ndescription: [x, y]\n---\n", "description"),
+        ("---\nname: a\ndescription: [x, y]\n---\n", "must be a string"),
+        ("---\nname: a\ndescription:\n  Use when: PDFs\n---\n", "must be a string"),
+        ("---\nname: a\ndescription: d\ndisable-model-invocation: true\n---\n", "disable-model-invocation"),
+        (
+            "---\nname: a\ndescription: d\ndisable-model-invocation: \"True\"\n---\n",
+            "disable-model-invocation",
+        ),
         ("---\n- a\n- b\n---\n", "mapping"),
         ("---\n---\n", "mapping"),
         ("---\nname: a\ndescription: [unclosed\n---\n", "invalid YAML"),
@@ -88,6 +124,18 @@ fn yaml_aliases_are_refused() {
     }
     bomb.push_str("---\n");
     assert!(parse(&bomb, "a").unwrap_err().contains("aliases"));
+}
+
+#[test]
+fn deep_nesting_is_refused_without_overflowing_the_stack() {
+    let deep = format!("---\nname: a\ndescription: d\nx:\n{}x\n---\n", "- ".repeat(100_000));
+    assert!(parse(&deep, "a").unwrap_err().contains("nested"));
+    let flow = format!("---\nname: a\ndescription: d\nx: {}{}\n---\n", "[".repeat(200), "]".repeat(200));
+    assert!(parse(&flow, "a").is_err());
+    // Two levels, as metadata uses, are fine.
+    assert!(
+        parse("---\nname: a\ndescription: d\nmetadata:\n  k: v\n---\n", "a").unwrap().problems.is_empty()
+    );
 }
 
 #[test]
@@ -132,6 +180,10 @@ fn spec_violations_warn_but_load() {
             .iter()
             .any(|w| w.contains("license"))
     );
+    // A name YAML doesn't read as a string falls back to the directory, which keeps the spelling.
+    let p = parse("---\nname: 007\ndescription: d\n---\n", "007").unwrap();
+    assert_eq!(p.name, "007");
+    assert!(p.problems.iter().any(|w| w.contains("quoted string")), "{:?}", p.problems);
     // A missing name falls back to the directory name.
     let p = parse("---\ndescription: d\n---\n", "from-dir").unwrap();
     assert_eq!(p.name, "from-dir");
@@ -166,6 +218,18 @@ fn discovery_finds_skill_dirs_only_and_project_wins() {
         warnings.iter().any(|w| w.contains("already defined") && w.contains(&mine.display().to_string()))
     );
     assert!(warnings.iter().any(|w| w.contains("no-desc") && w.contains("description")));
+
+    // A root reachable twice through a symlink is read once, without duplicate warnings, and a
+    // shadowed skill doesn't report its spec problems.
+    let link = d.join("link");
+    std::os::unix::fs::symlink(&user, &link).unwrap();
+    skill(&project, "bad", "---\nname: bad\ndescription: project\n---\n");
+    skill(&user, "bad", "---\nname: bad\ndescription: user\nlicense: [x]\n---\n");
+    let mut warnings = Vec::new();
+    let skills = discover(&[project, user, link], &mut warnings);
+    assert_eq!(skills.len(), 3);
+    assert_eq!(warnings.len(), 3, "{warnings:?}");
+    assert!(!warnings.iter().any(|w| w.contains("license")));
 }
 
 #[test]

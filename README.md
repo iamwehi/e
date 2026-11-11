@@ -59,8 +59,9 @@ The system prompt lists each skill's name, description and the absolute path of 
 `SKILL.md`. The model reads a `SKILL.md` when the skill fits the task, and loads the files it
 references on demand, resolving relative paths against the skill's directory. Skills are found
 when a session starts (launch or `/new`). Frontmatter that breaks the spec, such as a `name`
-that doesn't match its directory, produces a warning; a skill without a description or with
-unparseable frontmatter is skipped with a warning.
+that doesn't match its directory, produces a warning. A skill is skipped, with a warning, if
+it has no description, its frontmatter can't be parsed, or it sets `disable-model-invocation`
+(`e` has no way for you to start a skill yourself).
 
 ## Config
 
