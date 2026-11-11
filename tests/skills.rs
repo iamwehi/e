@@ -3,7 +3,7 @@
 mod common;
 
 use common::tempdir;
-use e::skills::{Skill, activate, catalog, discover, parse};
+use e::skills::{Skill, activate, catalog, discover, find_command, parse};
 use std::path::{Path, PathBuf};
 
 fn skill(root: &Path, dir: &str, text: &str) -> PathBuf {
@@ -290,7 +290,8 @@ fn activation_sends_the_body_directory_and_bundled_files() {
         format!(
             "<skill_content name=\"x-y\">\n# Steps\nRun scripts/run.sh.\n\nSkill directory: {}\n\
              Relative paths in this skill are relative to the skill directory.\n\n<skill_resources>\n\
-             <file>references/a&lt;b&gt;.md</file>\n<file>scripts/run.sh</file>\n</skill_resources>\n</skill_content>",
+             <file>references/a&lt;b&gt;.md</file>\n<file>scripts/run.sh</file>\n\
+             (incomplete: the skill directory has more files)\n</skill_resources>\n</skill_content>",
             dir.display()
         ),
         "frontmatter stripped, hidden files and files deeper than four levels left out"
@@ -304,7 +305,7 @@ fn activation_sends_the_body_directory_and_bundled_files() {
     }
     let msg = activate(&s).unwrap();
     assert_eq!(msg.matches("<file>").count(), 50);
-    assert!(msg.contains("more files not listed"));
+    assert!(msg.contains("(incomplete: the skill directory has more files)"));
     std::fs::remove_file(&loc).unwrap();
     assert!(activate(&s).is_err());
 }
@@ -327,4 +328,42 @@ fn slash_skill_messages_load_once_per_session() {
     );
     let again = s.skill_message("deploy", "").unwrap().unwrap();
     assert_eq!(again, "(The deploy skill's instructions are above.)\n\nThe user started the deploy skill.");
+}
+
+#[test]
+fn a_symlink_fan_cannot_stall_activation() {
+    let d = tempdir("skill-fan");
+    let loc = skill(&d, "fan", "---\nname: fan\ndescription: d\n---\nbody");
+    let fan = loc.parent().unwrap().join("d");
+    std::fs::create_dir_all(&fan).unwrap();
+    for i in 0..300 {
+        std::os::unix::fs::symlink(".", fan.join(format!("l{i:03}"))).unwrap();
+    }
+    let s = discover(std::slice::from_ref(&d), &mut Vec::new()).remove(0);
+    let t = std::time::Instant::now();
+    let msg = activate(&s).unwrap();
+    assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+    assert!(msg.contains("(incomplete: the skill directory has more files)"));
+}
+
+#[test]
+fn commands_match_the_longest_skill_name() {
+    let mk = |name: &str| Skill {
+        name: name.into(),
+        description: "d".into(),
+        location: PathBuf::from("/x/SKILL.md"),
+        user_only: false,
+    };
+    let skills = [mk("pdf"), mk("pdf tools"), mk("new"), mk("new thing")];
+    let found =
+        |cmd| find_command(&skills, cmd, &["model", "new", "skills"]).map(|(k, t)| (k.name.as_str(), t));
+    assert_eq!(found("pdf"), Some(("pdf", "")));
+    assert_eq!(found("pdf  merge a.pdf "), Some(("pdf", "merge a.pdf")));
+    assert_eq!(found("pdf tools go"), Some(("pdf tools", "go")));
+    assert_eq!(found("pdf tools"), Some(("pdf tools", "")));
+    assert_eq!(found("pdftools"), None);
+    assert_eq!(found("src/Vault.sol is in scope"), None);
+    // A built-in command's name never starts a skill; a longer name that begins with one does.
+    assert_eq!(found("new"), None);
+    assert_eq!(found("new thing x"), Some(("new thing", "x")));
 }

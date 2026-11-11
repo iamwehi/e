@@ -63,7 +63,14 @@ struct Commands(Vec<String>);
 impl Commands {
     fn of(s: &Session) -> Self {
         let mut names: Vec<String> = COMMANDS.iter().map(|c| c.to_string()).collect();
-        names.extend(s.skills.iter().map(|k| k.name.clone()).filter(|n| !COMMANDS.contains(&n.as_str())));
+        // The line editor echoes a completion raw, so a name with escape sequences (from a
+        // skill in the audited repo) would reach the terminal.
+        names.extend(
+            s.skills
+                .iter()
+                .map(|k| k.name.clone())
+                .filter(|n| !COMMANDS.contains(&n.as_str()) && term::sanitize(n) == *n),
+        );
         Commands(names)
     }
 }
@@ -91,12 +98,14 @@ impl Highlighter for Commands {}
 impl Validator for Commands {}
 impl rustyline::Helper for Commands {}
 
-/// `/name task` as the message that starts skill `name`: `None` if no skill has that name
-/// (so `/src/Vault.sol is in scope` stays an ordinary task).
-fn skill_task(s: &mut Session, line: &str) -> Option<Result<String, String>> {
+/// `/name task` as the skill's name and the message that starts it: `None` if the line names
+/// no skill (so `/src/Vault.sol is in scope` stays an ordinary task).
+fn skill_task(s: &mut Session, line: &str) -> Option<(String, Result<String, String>)> {
     let cmd = line.strip_prefix('/')?;
-    let (name, task) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
-    s.skill_message(name, task)
+    let (skill, task) = e::skills::find_command(&s.skills, cmd, &COMMANDS)?;
+    let name = skill.name.clone();
+    let msg = s.skill_message(&name, task)?;
+    Some((name, msg))
 }
 
 /// The run Ctrl-C should cancel, if one is active.
@@ -213,8 +222,8 @@ async fn headless(mut s: Session, task: &str, json: bool, verbose: bool) -> u8 {
     }
     let expanded = match skill_task(&mut s, task) {
         None => None,
-        Some(Ok(msg)) => Some(msg),
-        Some(Err(e)) => {
+        Some((_, Ok(msg))) => Some(msg),
+        Some((_, Err(e))) => {
             eprintln!("e: skill: {}", term::sanitize(&e));
             return 1;
         }
@@ -352,16 +361,12 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
                         list_skills(&mut ui, &s);
                         None
                     }
-                    _ if COMMANDS.contains(&name) => {
-                        ui.notice(HELP);
-                        None
-                    }
                     _ => match skill_task(&mut s, &line) {
-                        Some(Ok(msg)) => {
+                        Some((name, Ok(msg))) => {
                             ui.notice(&format!("skill: {name}"));
                             Some(msg)
                         }
-                        Some(Err(e)) => {
+                        Some((_, Err(e))) => {
                             ui.notice(&format!("error: {e}"));
                             None
                         }

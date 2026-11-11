@@ -245,21 +245,22 @@ pub fn activate(skill: &Skill) -> Result<String, String> {
     let text = std::fs::read_to_string(&skill.location).map_err(|e| format!("{shown}: {e}"))?;
     let (_, body) = split(&text).ok_or_else(|| format!("{shown}: no YAML frontmatter"))?;
     let dir = skill.location.parent().unwrap_or(Path::new("/"));
-    let mut files = Vec::new();
-    let more = list_files(dir, Path::new(""), 0, &mut files);
+    let mut listing = Listing { files: Vec::new(), budget: MAX_ENTRIES, incomplete: false };
+    listing.walk(dir, Path::new(""), 0);
+    let Listing { files, incomplete, .. } = listing;
     let mut out = format!(
         "<skill_content name=\"{}\">\n{}\n\nSkill directory: {}\nRelative paths in this skill are relative to the skill directory.\n",
         xml_escape(&skill.name).replace('"', "&quot;"),
         body.trim(),
         dir.display(),
     );
-    if !files.is_empty() {
+    if !files.is_empty() || incomplete {
         out.push_str("\n<skill_resources>\n");
         for f in &files {
             out.push_str(&format!("<file>{}</file>\n", xml_escape(&f.display().to_string())));
         }
-        if more {
-            out.push_str(&format!("(more files not listed; only the first {MAX_RESOURCES} are)\n"));
+        if incomplete {
+            out.push_str("(incomplete: the skill directory has more files)\n");
         }
         out.push_str("</skill_resources>\n");
     }
@@ -267,28 +268,64 @@ pub fn activate(skill: &Skill) -> Result<String, String> {
     Ok(out)
 }
 
-/// Add files under `dir` to `files` as paths relative to the skill directory, sorted, skipping
-/// hidden entries and the top-level `SKILL.md`, at most four levels deep. True if the listing
-/// hit [`MAX_RESOURCES`].
-fn list_files(dir: &Path, rel: &Path, depth: usize, files: &mut Vec<PathBuf>) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else { return false };
-    let mut entries: Vec<_> =
-        entries.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        let (path, rel) = (e.path(), rel.join(e.file_name()));
-        if path.is_dir() {
-            if depth < 3 && list_files(&path, &rel, depth + 1, files) {
-                return true;
+/// At most this many directory entries are examined when listing a skill's files, so a huge
+/// tree or a fan of symlinks to `.` can't stall activation.
+const MAX_ENTRIES: usize = 1000;
+
+/// Files in a skill directory as paths relative to it, sorted, skipping hidden entries and
+/// the top-level `SKILL.md`, at most four levels deep.
+struct Listing {
+    files: Vec<PathBuf>,
+    budget: usize,
+    /// Something was left out: the file cap, the entry budget or the depth limit.
+    incomplete: bool,
+}
+
+impl Listing {
+    fn walk(&mut self, dir: &Path, rel: &Path, depth: usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<_> = entries
+            .flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .take(self.budget + 1)
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            if self.budget == 0 || self.files.len() == MAX_RESOURCES {
+                self.incomplete = true;
+                return;
             }
-        } else if rel != Path::new("SKILL.md") {
-            if files.len() == MAX_RESOURCES {
-                return true;
+            self.budget -= 1;
+            let (path, rel) = (e.path(), rel.join(e.file_name()));
+            if !path.is_dir() {
+                if rel != Path::new("SKILL.md") {
+                    self.files.push(rel);
+                }
+            } else if depth < 3 {
+                self.walk(&path, &rel, depth + 1);
+            } else {
+                self.incomplete = true;
             }
-            files.push(rel);
         }
     }
-    false
+}
+
+/// The skill a `/...` command line (without the slash) starts, and the task after its name:
+/// the longest skill name followed by whitespace or the end, so names with spaces work.
+/// Skills named like one of `reserved` (the built-in commands) never match.
+pub fn find_command<'s, 'c>(
+    skills: &'s [Skill],
+    cmd: &'c str,
+    reserved: &[&str],
+) -> Option<(&'s Skill, &'c str)> {
+    skills
+        .iter()
+        .filter(|k| !reserved.contains(&k.name.as_str()))
+        .filter_map(|k| {
+            let rest = cmd.strip_prefix(k.name.as_str())?;
+            (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some((k, rest.trim()))
+        })
+        .max_by_key(|(k, _)| k.name.len())
 }
 
 /// The YAML between a first line of `---` and the next `---` line, and the body after it.
