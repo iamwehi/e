@@ -1,8 +1,8 @@
 //! `e`: a minimal security-audit agent harness.
 //!
 //! A small loop (agent), four general tools plus `finding` (tools, exec), a
-//! short system prompt (prompt), DeepSeek streaming (provider) and state in
-//! plain files under `.e/` (transcript, findings, notes).
+//! short system prompt (prompt), a streaming chat client (provider, Venice by
+//! default) and state in plain files under `.e/` (transcript, findings, notes).
 
 pub mod agent;
 pub mod config;

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 fn session(url: &str, tag: &str) -> Session {
-    Session::new(config(url), "deepseek-flash".into(), tempdir(tag), false).unwrap()
+    Session::new(config(url), e::config::Config::default().model, tempdir(tag), false).unwrap()
 }
 
 /// Checks a recorded request body against the API's rules.
@@ -55,6 +55,15 @@ async fn loop_runs_tools_and_ends_on_a_reply_without_tool_calls() {
     }
     // The system prompt is identical across requests (prefix caching).
     assert_eq!(reqs[0]["messages"][0], reqs[1]["messages"][0]);
+    // Venice: our system prompt only, and a stable cache routing key.
+    for r in &reqs {
+        assert_eq!(r["model"], "deepseek-v4-1-flash");
+        assert_eq!(r["venice_parameters"]["include_venice_system_prompt"], false);
+        assert_eq!(r["stream_options"]["include_usage"], true);
+        assert!(r["prompt_cache_key"].as_str().unwrap().starts_with("e-"));
+    }
+    assert_eq!(reqs[0]["prompt_cache_key"], reqs[1]["prompt_cache_key"]);
+    assert!(s.meter.cost > 0.0, "default model is priced");
     let msgs = reqs[1]["messages"].as_array().unwrap();
     assert_eq!(msgs[2]["reasoning_content"], "plan");
     assert_eq!(msgs[3]["role"], "tool");
@@ -69,6 +78,25 @@ async fn loop_runs_tools_and_ends_on_a_reply_without_tool_calls() {
     for kind in ["session", "user", "request", "response", "tool_call", "tool_result", "run_end"] {
         assert!(log.contains(&format!("\"type\":\"{kind}\"")), "missing {kind}");
     }
+}
+
+#[tokio::test]
+async fn config_can_point_at_deepseek_instead() {
+    let m = mock(vec![text_reply("ok", usage(10, 1))]).await;
+    let cfg: e::config::Config = serde_json::from_value(json!({
+        "base_url": m.url, "api_key_env": "E_TEST_UNSET_KEY", "api_key": "k",
+        "extra_body": {}, "prompt_cache_key": false, "model": "deepseek-flash"
+    }))
+    .unwrap();
+    let mut s = Session::new(cfg.clone(), cfg.model.clone(), tempdir("deepseek"), false).unwrap();
+    assert_eq!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Done("ok".into()));
+    let req = m.requests.lock().unwrap()[0].clone();
+    assert_eq!(req["model"], "deepseek-flash");
+    assert!(req.get("venice_parameters").is_none() && req.get("prompt_cache_key").is_none());
+
+    let missing = e::config::Config { api_key: None, ..cfg };
+    let err = Session::new(missing, "m".into(), tempdir("nokey"), false).err().unwrap();
+    assert!(err.contains("E_TEST_UNSET_KEY is not set"), "{err}");
 }
 
 #[tokio::test]
@@ -157,7 +185,7 @@ async fn budget_warns_at_85_percent_and_ends_at_100() {
     .await;
     let mut cfg = config(&m.url);
     cfg.context_budget = 1000;
-    let mut s = Session::new(cfg, "deepseek-flash".into(), tempdir("budget"), false).unwrap();
+    let mut s = Session::new(cfg, "deepseek-v4-1-flash".into(), tempdir("budget"), false).unwrap();
     let end = s.run("go", &Cancel::default(), &mut |_| {}).await;
     assert!(matches!(end, RunEnd::Budget(_)), "{end:?}");
     assert_eq!(end.exit_code(), 2);

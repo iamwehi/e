@@ -16,7 +16,8 @@ const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
   -v, --verbose  show reasoning and full tool output
 
 Interactive commands: /model <id>, /new. Ctrl-C cancels a run, Ctrl-D exits.
-Config: $E_CONFIG or ~/.config/e/config.json. Key: DEEPSEEK_API_KEY.";
+Provider: Venice by default (key in VENICE_API_KEY); any OpenAI-compatible
+API via config. Config: $E_CONFIG or ~/.config/e/config.json.";
 
 #[derive(Default)]
 struct Args {

@@ -2,7 +2,10 @@
 
 A minimal security-audit agent harness. A small loop, four general tools
 (`read`, `bash`, `edit`, `write`) and one audit tool (`finding`), a short
-system prompt, and state in plain files under `.e/`. The model is DeepSeek.
+system prompt, and state in plain files under `.e/`. The default provider is
+[Venice](https://venice.ai) with its DeepSeek V4.1 Flash model; any
+OpenAI-compatible chat completions API (such as DeepSeek's own) works by
+config.
 
 `e` assumes it runs inside an external sandbox: it has no approvals,
 permission prompts, command filtering or path restrictions.
@@ -10,7 +13,7 @@ permission prompts, command filtering or path restrictions.
 ## Usage
 
 ```bash
-export DEEPSEEK_API_KEY=...
+export VENICE_API_KEY=...
 cd path/to/target && e
 ```
 
@@ -38,17 +41,44 @@ Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
 ## Config
 
 `$E_CONFIG`, else `~/.config/e/config.json`. Every key is optional; a key
-you set replaces the default (so `prices` replaces the whole table).
+you set replaces the default (so `prices` replaces the whole table). The
+defaults:
 
 ```json
 {
-  "base_url": "https://api.deepseek.com",
-  "model": "deepseek-flash",
+  "base_url": "https://api.venice.ai/api/v1",
+  "model": "deepseek-v4-1-flash",
+  "api_key_env": "VENICE_API_KEY",
+  "extra_body": {"venice_parameters": {"include_venice_system_prompt": false}},
+  "prompt_cache_key": true,
   "context_budget": 300000,
   "bash_timeout_s": 120,
   "poc_timeout_s": 600,
   "max_tokens": null,
   "reasoning_effort": null,
+  "peak_hours_utc": [],
+  "prices": {
+    "deepseek-v4-1-flash": {"hit": 0.0075, "miss": 0.3, "output": 1.2}
+  }
+}
+```
+
+The built-in price table also covers Venice's other DeepSeek V4 models.
+Prices are USD per 1M tokens: `hit` for cached prompt tokens, `miss` for the
+rest, `output` for completion tokens (reasoning included). A model without
+prices shows token counts instead of a cost. `extra_body` is merged into every
+request; the default stops Venice from adding its own system prompt.
+`prompt_cache_key` sends a per-session key so requests reach a warm cache.
+
+To use DeepSeek's own API instead:
+
+```json
+{
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-flash",
+  "api_key_env": "DEEPSEEK_API_KEY",
+  "extra_body": {},
+  "prompt_cache_key": false,
   "peak_hours_utc": [[1, 4], [6, 10]],
   "prices": {
     "deepseek-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
@@ -57,8 +87,7 @@ you set replaces the default (so `prices` replaces the whole table).
 }
 ```
 
-Prices are USD per 1M tokens. Peak hours are Monday to Friday, UTC. A model
-without prices shows token counts instead of a cost.
+Peak hours are Monday to Friday, UTC; `off_peak` rates apply outside them.
 
 ## Checks
 

@@ -69,7 +69,7 @@ pub struct Session {
 
 impl Session {
     pub fn new(cfg: Config, model: String, cwd: PathBuf, echo_json: bool) -> Result<Self, String> {
-        let key = cfg.api_key().ok_or("DEEPSEEK_API_KEY is not set")?;
+        let key = cfg.api_key().ok_or_else(|| format!("{} is not set", cfg.api_key_env))?;
         let client = Client::new(&cfg.base_url, key)?;
         let (system, warnings) = prompt::build(&cwd, &crate::transcript::today());
         let tools = tools::schemas();
@@ -112,6 +112,14 @@ impl Session {
         }
         if let Some(e) = &self.cfg.reasoning_effort {
             body["reasoning_effort"] = json!(e);
+        }
+        if self.cfg.prompt_cache_key {
+            // Constant for the session, so the request stays a stable prefix.
+            let id = self.transcript.dir.file_name().map(|n| n.to_string_lossy().into_owned());
+            body["prompt_cache_key"] = json!(format!("e-{}", id.unwrap_or_default()));
+        }
+        for (k, v) in &self.cfg.extra_body {
+            body[k] = v.clone();
         }
         body
     }

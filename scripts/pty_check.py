@@ -7,13 +7,13 @@ E = os.path.join(HERE, "..", "target", "release", "e")
 S = tempfile.mkdtemp(prefix="e-pty-")
 def mock(port, script):
     p = os.path.join(S, "script%d.json" % port); json.dump(script, open(p, "w"))
-    proc = subprocess.Popen([sys.executable, os.path.join(HERE, "mock_deepseek.py"), str(port), p]); time.sleep(0.5); return proc
+    proc = subprocess.Popen([sys.executable, os.path.join(HERE, "mock_api.py"), str(port), p]); time.sleep(0.5); return proc
 def setup(name, port):
     d = os.path.join(S, name); subprocess.run(["rm", "-rf", d]); os.makedirs(d)
     json.dump({"base_url": "http://127.0.0.1:%d" % port}, open(os.path.join(d, "cfg.json"), "w")); return d
 class Pty:
     def __init__(self, d, inner):
-        env = dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), DEEPSEEK_API_KEY="k", TERM="xterm")
+        env = dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), VENICE_API_KEY="k", TERM="xterm")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(d); os.execvpe("bash", ["bash", "--norc", "-c", "stty -g > before; " + inner + "; echo EXIT=$?; stty -g > after"], env)
@@ -36,7 +36,7 @@ def alive(pid):
 def stty_same(d): return open(os.path.join(d, "before")).read() == open(os.path.join(d, "after")).read()
 def check(label, ok): print(("PASS " if ok else "FAIL ") + label); return ok
 
-PROMPT = rb"deepseek-flash \$[0-9.]+ > "
+PROMPT = rb"deepseek-v4-1-flash \$[0-9.]+ > "
 results = []
 # A: escape sequences, Ctrl-C mid-command, Ctrl-D
 m = mock(8801, [
@@ -97,10 +97,10 @@ time.sleep(1); p.send(b"first\r"); time.sleep(2); p.send(b"\x04")
 p.read_until(rb"EXIT=", 5)
 out = open(os.path.join(d, "out.txt"), "rb").read()
 results.append(check("D interactive piped stdout has no ESC (%d bytes)" % len(out), b"\x1b" not in out and b"fin bold" in out))
-r = subprocess.run([E, "-p", "go", "--verbose"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), DEEPSEEK_API_KEY="k"))
+r = subprocess.run([E, "-p", "go", "--verbose"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), VENICE_API_KEY="k"))
 results.append(check("D headless: exit 0, final message on stdout, no ESC anywhere",
     r.returncode == 0 and r.stdout == b"headless final\n" and b"\x1b" not in r.stderr + r.stdout))
-r = subprocess.run([E, "-p", "go", "--json"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), DEEPSEEK_API_KEY="k"))
+r = subprocess.run([E, "-p", "go", "--json"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), VENICE_API_KEY="k"))
 lines = [json.loads(l) for l in r.stdout.splitlines()]
 results.append(check("D --json: valid JSONL events ending in run_end", r.returncode == 0 and lines[-1]["type"] == "run_end"))
 m.terminate()

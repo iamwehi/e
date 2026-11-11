@@ -217,28 +217,48 @@ async fn finding_status_comes_from_the_poc_exit_code() {
     assert!(finding(&d, bad).await.0.is_error);
 }
 
+fn venice_usage(prompt: u64, cached: u64, completion: u64) -> Usage {
+    serde_json::from_value(json!({"prompt_tokens": prompt, "completion_tokens": completion,
+        "prompt_tokens_details": {"cached_tokens": cached}}))
+    .unwrap()
+}
+
 #[test]
 fn cost_uses_cache_hit_miss_and_output_prices() {
     let cfg = Config::default();
-    let u = Usage {
-        prompt_tokens: 3_000_000,
-        completion_tokens: 500_000,
-        prompt_cache_hit_tokens: 1_000_000,
-        prompt_cache_miss_tokens: 2_000_000,
-    };
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+    // Venice: 1M cached, 2M uncached, 0.5M output; prices have no peak hours.
+    let u = venice_usage(3_000_000, 1_000_000, 500_000);
+    assert_eq!(u.hit_miss(), (1_000_000, 2_000_000));
+    assert!(close(cfg.cost("deepseek-v4-1-flash", &u, 0).unwrap(), 0.0075 + 0.6 + 0.6));
+    assert!(close(cfg.cost("deepseek-v4-pro", &u, 0).unwrap(), 0.33 + 3.3 + 1.6505));
+    assert_eq!(cfg.cost("other-model", &u, 0), None);
+    // No cache details at all: every prompt token is a miss.
+    let plain: Usage =
+        serde_json::from_value(json!({"prompt_tokens": 1000, "completion_tokens": 10})).unwrap();
+    assert_eq!(plain.hit_miss(), (0, 1000));
+
+    // DeepSeek's own API: hit/miss fields and peak/off-peak prices by config.
+    let ds: Config = serde_json::from_value(json!({
+        "peak_hours_utc": [[1, 4], [6, 10]],
+        "prices": {"deepseek-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
+                   "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}}}
+    }))
+    .unwrap();
+    let u: Usage = serde_json::from_value(json!({"prompt_tokens": 3_000_000, "completion_tokens": 500_000,
+        "prompt_cache_hit_tokens": 1_000_000, "prompt_cache_miss_tokens": 2_000_000,
+        "prompt_tokens_details": {"cached_tokens": 1_000_000}}))
+    .unwrap();
     // Wednesday 2026-11-11 08:00 UTC is peak; 12:00 is off-peak; Saturday is off-peak.
     let peak = 1_794_355_200 + 8 * 3600;
     let off = 1_794_355_200 + 12 * 3600;
     let saturday = 1_794_355_200 + 3 * 86_400 + 8 * 3600;
-    let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
-    assert!(close(cfg.cost("deepseek-flash", &u, peak).unwrap(), 0.006 + 0.6 + 0.6));
-    assert!(close(cfg.cost("deepseek-flash", &u, off).unwrap(), 0.003 + 0.3 + 0.3));
-    assert!(close(cfg.cost("deepseek-flash", &u, saturday).unwrap(), 0.003 + 0.3 + 0.3));
-    assert!(close(cfg.cost("deepseek-v4-pro", &u, peak).unwrap(), 0.044 + 2.64 + 1.98));
-    assert_eq!(cfg.cost("other-model", &u, peak), None);
+    assert!(close(ds.cost("deepseek-flash", &u, peak).unwrap(), 0.006 + 0.6 + 0.6));
+    assert!(close(ds.cost("deepseek-flash", &u, off).unwrap(), 0.003 + 0.3 + 0.3));
+    assert!(close(ds.cost("deepseek-flash", &u, saturday).unwrap(), 0.003 + 0.3 + 0.3));
 
     let mut m = Meter::default();
-    m.add(&u, cfg.cost("deepseek-flash", &u, peak));
+    m.add(&u, ds.cost("deepseek-flash", &u, peak));
     assert_eq!(m.display(), "$1.2060");
     let small = Usage { prompt_tokens: 1000, completion_tokens: 234, ..Usage::default() };
     m.add(&small, None);

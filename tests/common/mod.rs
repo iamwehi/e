@@ -1,4 +1,4 @@
-//! A scripted mock of DeepSeek's streaming endpoint on 127.0.0.1. Each
+//! A scripted mock of an OpenAI-compatible streaming endpoint on 127.0.0.1. Each
 //! connection gets the next scripted response; request bodies are recorded.
 #![allow(dead_code)]
 
@@ -96,10 +96,10 @@ async fn read_request(sock: &mut tokio::net::TcpStream) -> Vec<u8> {
     }
 }
 
+/// Venice-style usage: cache hits in `prompt_tokens_details.cached_tokens`.
 pub fn usage(prompt: u64, completion: u64) -> Value {
     json!({"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion,
-           "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": prompt,
-           "prompt_tokens_details": {"cached_tokens": 0}})
+           "prompt_tokens_details": {"cached_tokens": prompt / 2, "cache_creation_input_tokens": 0}})
 }
 
 /// A text reply split into chunks, with reasoning first.

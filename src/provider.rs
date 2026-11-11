@@ -1,8 +1,10 @@
-//! DeepSeek's OpenAI-compatible streaming chat completions API.
+//! OpenAI-compatible streaming chat completions: Venice by default, DeepSeek's
+//! own API by configuration.
 //!
-//! Per the DeepSeek docs (thinking mode): when a request carries `tools`, the
-//! `reasoning_content` of every previous assistant turn must be sent back, or
-//! the API answers 400. We always send tools, so assistant messages keep it.
+//! Assistant messages keep their `reasoning_content` and it is sent back on
+//! every request. DeepSeek answers 400 without it when a request carries
+//! `tools` (which ours always do); Venice asks for the assistant message to
+//! be sent back unmodified, `reasoning_content` included.
 
 use crate::config::Usage;
 use crate::exec::Cancel;
@@ -118,7 +120,7 @@ impl Client {
         let base = base_url.trim_end_matches('/');
         let mut b = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(30))
-            // DeepSeek sends keep-alive comments while it queues a request.
+            // Reasoning can take minutes before the first visible token.
             .read_timeout(Duration::from_secs(600));
         let host = base.split("://").nth(1).unwrap_or("").split(['/', ':']).next().unwrap_or("");
         if host == "127.0.0.1" || host == "localhost" {

@@ -1,4 +1,4 @@
-# Scripted DeepSeek SSE mock. argv: port script.json. Script: list of
+# Scripted mock of an OpenAI-compatible SSE chat endpoint (Venice-style usage). argv: port script.json. Script: list of
 # {"tool": [name, args]} or {"text": "..."}; served in order, then text "end".
 import json, sys, http.server, threading
 port, script = int(sys.argv[1]), json.load(open(sys.argv[2]))
@@ -12,7 +12,7 @@ class H(http.server.BaseHTTPRequestHandler):
             r = script[n[0]] if n[0] < len(script) else {"text": "end"}; n[0] += 1
         self.send_response(200); self.send_header("content-type", "text/event-stream")
         self.send_header("connection", "close"); self.end_headers()
-        u = {"prompt_tokens": 1000, "completion_tokens": 100, "prompt_cache_hit_tokens": 600, "prompt_cache_miss_tokens": 400}
+        u = {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100, "prompt_tokens_details": {"cached_tokens": 600}}
         if "tool" in r:
             name, args = r["tool"]
             d = {"reasoning_content": "r", "tool_calls": [{"index": 0, "id": "c%d" % n[0], "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
