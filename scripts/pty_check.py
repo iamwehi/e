@@ -10,10 +10,10 @@ def mock(port, script):
     proc = subprocess.Popen([sys.executable, os.path.join(HERE, "mock_api.py"), str(port), p]); time.sleep(0.5); return proc
 def setup(name, port):
     d = os.path.join(S, name); subprocess.run(["rm", "-rf", d]); os.makedirs(d)
-    json.dump({"base_url": "http://127.0.0.1:%d" % port}, open(os.path.join(d, "cfg.json"), "w")); return d
+    open(os.path.join(d, "cfg.toml"), "w").write('base_url = "http://127.0.0.1:%d"\n' % port); return d
 class Pty:
     def __init__(self, d, inner):
-        env = dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), VENICE_API_KEY="k", TERM="xterm")
+        env = dict(os.environ, E_CONFIG=os.path.join(d, "cfg.toml"), VENICE_API_KEY="k", TERM="xterm")
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(d); os.execvpe("bash", ["bash", "--norc", "-c", "stty -g > before; " + inner + "; echo EXIT=$?; stty -g > after"], env)
@@ -97,10 +97,10 @@ time.sleep(1); p.send(b"first\r"); time.sleep(2); p.send(b"\x04")
 p.read_until(rb"EXIT=", 5)
 out = open(os.path.join(d, "out.txt"), "rb").read()
 results.append(check("D interactive piped stdout has no ESC (%d bytes)" % len(out), b"\x1b" not in out and b"fin bold" in out))
-r = subprocess.run([E, "-p", "go", "--verbose"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), VENICE_API_KEY="k"))
+r = subprocess.run([E, "-p", "go", "--verbose"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.toml"), VENICE_API_KEY="k"))
 results.append(check("D headless: exit 0, final message on stdout, no ESC anywhere",
     r.returncode == 0 and r.stdout == b"headless final\n" and b"\x1b" not in r.stderr + r.stdout))
-r = subprocess.run([E, "-p", "go", "--json"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.json"), VENICE_API_KEY="k"))
+r = subprocess.run([E, "-p", "go", "--json"], cwd=d, capture_output=True, env=dict(os.environ, E_CONFIG=os.path.join(d, "cfg.toml"), VENICE_API_KEY="k"))
 lines = [json.loads(l) for l in r.stdout.splitlines()]
 results.append(check("D --json: valid JSONL events ending in run_end", r.returncode == 0 and lines[-1]["type"] == "run_end"))
 m.terminate()

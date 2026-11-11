@@ -17,7 +17,7 @@ const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
 
 Interactive commands: /model <id>, /new. Ctrl-C cancels a run, Ctrl-D exits.
 Provider: Venice by default (key in VENICE_API_KEY); any OpenAI-compatible
-API via config. Config: $E_CONFIG or ~/.config/e/config.json.";
+API via config. Config: $E_CONFIG or ~/.config/e/config.toml.";
 
 #[derive(Default)]
 struct Args {
