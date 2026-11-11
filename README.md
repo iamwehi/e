@@ -74,27 +74,32 @@ frontmatter that can't be parsed is skipped with a warning.
 
 ## Config
 
-`$E_CONFIG`, else `~/.config/e/config.json`. Every key is optional; a key
-you set replaces the default (so `prices` replaces the whole table). The
-defaults:
+`$E_CONFIG`, else `~/.config/e/config.toml` (`$XDG_CONFIG_HOME` is honoured).
+Every key is optional; a key you set replaces the default whole (so `prices`
+replaces the whole table). Unknown keys are errors. The defaults:
 
-```json
-{
-  "base_url": "https://api.venice.ai/api/v1",
-  "model": "deepseek-v4-1-flash",
-  "api_key_env": "VENICE_API_KEY",
-  "extra_body": {"venice_parameters": {"include_venice_system_prompt": false}},
-  "prompt_cache_key": true,
-  "context_budget": 300000,
-  "bash_timeout_s": 120,
-  "poc_timeout_s": 600,
-  "max_tokens": null,
-  "reasoning_effort": null,
-  "peak_hours_utc": [],
-  "prices": {
-    "deepseek-v4-1-flash": {"hit": 0.0075, "miss": 0.3, "output": 1.2}
-  }
-}
+```toml
+base_url = "https://api.venice.ai/api/v1"
+model = "deepseek-v4-1-flash"
+api_key_env = "VENICE_API_KEY"
+# api_key = "..."            # fallback when $VENICE_API_KEY is unset
+prompt_cache_key = true
+prompt_cache_retention = "extended"
+prompt_cache_retention_models = ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"]
+context_budget = 300_000
+bash_timeout_s = 120
+poc_timeout_s = 600
+# max_tokens = 32_000        # unset: the provider's default
+# reasoning_effort = "high"  # unset: not sent
+peak_hours_utc = []
+
+[extra_body]
+venice_parameters = { include_venice_system_prompt = false }
+
+[prices.deepseek-v4-1-flash]
+hit = 0.0075
+miss = 0.3
+output = 1.2
 ```
 
 The built-in price table also covers Venice's other DeepSeek V4 models
@@ -105,29 +110,49 @@ included), and an optional `write` for tokens written to the cache by models
 that charge a premium for it (otherwise they cost `miss`). Extended-context
 price tiers are not modelled. A model without prices shows token counts
 instead of a cost; the table is keyed by model id only, so set `prices`
-whenever you change `base_url`. `extra_body` is merged into every
-request; the default stops Venice from adding its own system prompt.
-`prompt_cache_key` sends a per-session key so requests reach a warm cache.
+whenever you change `base_url`. Quote model ids that contain a dot:
+`[prices."gpt-5.5"]`. `extra_body` is merged into every request; the default
+stops Venice from adding its own system prompt. `prompt_cache_key` sends a
+per-session key so requests reach a warm cache.
+
+Prompt caching is the provider's: `e` only keeps every request a stable
+prefix of the next. Caches expire after a few idle minutes (about 5 for
+DeepSeek models on Venice), so a long build or PoC run can cost one uncached
+turn. `prompt_cache_retention` is sent only for the model ids listed in
+`prompt_cache_retention_models`. Venice forwards `"extended"` (24 hours) to
+OpenAI and other models ignore it; OpenAI honours it only on GPT-5.5, 5.5 Pro,
+5.4 and 5.2 among the models Venice serves (GPT-5.6 and later control cache
+lifetime differently). It has no effect on the default model. Set
+`prompt_cache_retention = ""` to never send it.
 
 To use DeepSeek's own API instead:
 
-```json
-{
-  "base_url": "https://api.deepseek.com",
-  "model": "deepseek-flash",
-  "api_key_env": "DEEPSEEK_API_KEY",
-  "extra_body": {},
-  "prompt_cache_key": false,
-  "peak_hours_utc": [[1, 4], [6, 10]],
-  "prices": {
-    "deepseek-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
-                       "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}},
-    "deepseek-v4-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
-                          "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}},
-    "deepseek-v4-pro": {"hit": 0.044, "miss": 1.32, "output": 3.96,
-                        "off_peak": {"hit": 0.022, "miss": 0.66, "output": 1.98}}
-  }
-}
+```toml
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"
+api_key_env = "DEEPSEEK_API_KEY"
+extra_body = {}
+prompt_cache_key = false
+prompt_cache_retention = ""
+peak_hours_utc = [[1, 4], [6, 10]]
+
+[prices.deepseek-flash]
+hit = 0.006
+miss = 0.3
+output = 1.2
+off_peak = { hit = 0.003, miss = 0.15, output = 0.6 }
+
+[prices.deepseek-v4-flash]
+hit = 0.006
+miss = 0.3
+output = 1.2
+off_peak = { hit = 0.003, miss = 0.15, output = 0.6 }
+
+[prices.deepseek-v4-pro]
+hit = 0.044
+miss = 1.32
+output = 3.96
+off_peak = { hit = 0.022, miss = 0.66, output = 1.98 }
 ```
 
 Peak hours are Monday to Friday, UTC; `off_peak` rates apply outside them.
@@ -141,3 +166,19 @@ cargo test
 ```bash
 cargo build --release && python3 scripts/pty_check.py
 ```
+
+CI (`.github/workflows/checks.yml`) runs these on every pull request and tag:
+
+```bash
+cargo fmt --all --check
+```
+
+```bash
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+```bash
+cargo deny --locked check
+```
+
+`deny.toml` holds the licence allow list and denies every RustSec advisory.

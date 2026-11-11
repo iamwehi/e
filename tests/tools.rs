@@ -242,18 +242,24 @@ fn cost_uses_cache_hit_miss_and_output_prices() {
         "prompt_tokens_details": {"cached_tokens": 200_000, "cache_creation_input_tokens": 500_000}}))
     .unwrap();
     assert_eq!(w.split(), (200_000, 500_000, 300_000));
-    let claude: Config = serde_json::from_value(json!({"prices": {
-        "m": {"hit": 0.5, "miss": 5.0, "output": 25.0, "write": 6.25}, "n": {"hit": 0.5, "miss": 5.0, "output": 25.0}}}))
+    let claude = Config::from_toml(
+        "[prices]\nm = { hit = 0.5, miss = 5.0, output = 25, write = 6.25 }\nn = { hit = 0.5, miss = 5, output = 25.0 }",
+    )
     .unwrap();
     assert!(close(claude.cost("m", &w, 0).unwrap(), 0.1 + 3.125 + 1.5));
     assert!(close(claude.cost("n", &w, 0).unwrap(), 0.1 + 2.5 + 1.5));
 
     // DeepSeek's own API: hit/miss fields and peak/off-peak prices by config.
-    let ds: Config = serde_json::from_value(json!({
-        "peak_hours_utc": [[1, 4], [6, 10]],
-        "prices": {"deepseek-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,
-                   "off_peak": {"hit": 0.003, "miss": 0.15, "output": 0.6}}}
-    }))
+    let ds = Config::from_toml(
+        r#"
+        peak_hours_utc = [[1, 4], [6, 10]]
+        [prices.deepseek-flash]
+        hit = 0.006
+        miss = 0.3
+        output = 1.2
+        off_peak = { hit = 0.003, miss = 0.15, output = 0.6 }
+        "#,
+    )
     .unwrap();
     let u: Usage = serde_json::from_value(json!({"prompt_tokens": 3_000_000, "completion_tokens": 500_000,
         "prompt_cache_hit_tokens": 1_000_000, "prompt_cache_miss_tokens": 2_000_000,
@@ -330,4 +336,37 @@ fn skills_frontmatter_and_prompt() {
     let (p, _) = e::prompt::build(&d, "2026-11-11", &[]);
     assert!(!p.contains("available_skills") && !p.contains("SKILL.md"));
     assert!(p.contains("Date: 2026-11-11\n\n<audit_brief>"));
+}
+
+/// The ```toml blocks of the README, in order.
+fn readme_toml() -> Vec<String> {
+    let readme = include_str!("../README.md");
+    readme.split("```toml\n").skip(1).map(|b| b.split("```").next().unwrap().to_string()).collect()
+}
+
+#[test]
+fn readme_config_examples_parse() {
+    let blocks = readme_toml();
+    assert_eq!(blocks.len(), 2);
+    // The first block is the defaults: it must parse to them, bar the shortened price table.
+    let documented = Config::from_toml(&blocks[0]).unwrap();
+    let mut defaults = Config::default();
+    assert_eq!(documented.prices["deepseek-v4-1-flash"], defaults.prices["deepseek-v4-1-flash"]);
+    defaults.prices = documented.prices.clone();
+    assert_eq!(serde_json::to_value(&documented).unwrap(), serde_json::to_value(&defaults).unwrap());
+
+    let ds = Config::from_toml(&blocks[1]).unwrap();
+    assert_eq!(ds.base_url, "https://api.deepseek.com");
+    assert!(ds.extra_body.is_empty() && ds.cache_retention("deepseek-flash").is_none());
+    assert!(ds.prices["deepseek-v4-pro"].off_peak.is_some());
+}
+
+#[test]
+fn config_rejects_unknown_keys_and_bad_toml() {
+    let err = Config::from_toml("modle = \"x\"").err().unwrap();
+    assert!(err.contains("modle"), "{err}");
+    assert!(Config::from_toml("model = ").is_err());
+    assert!(Config::from_toml("context_budget = \"lots\"").is_err());
+    // Empty file: all defaults.
+    assert_eq!(Config::from_toml("").unwrap().model, Config::default().model);
 }
