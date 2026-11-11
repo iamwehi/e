@@ -39,6 +39,10 @@ pub struct Config {
     pub extra_body: Map<String, Value>,
     /// Send a per-session `prompt_cache_key` so requests reach a warm cache.
     pub prompt_cache_key: bool,
+    /// `prompt_cache_retention` value, sent only for models whose id starts
+    /// with one of `prompt_cache_retention_models`.
+    pub prompt_cache_retention: Option<String>,
+    pub prompt_cache_retention_models: Vec<String>,
     /// Context tokens per run (prompt + completion of the latest response).
     pub context_budget: u64,
     pub bash_timeout_s: u64,
@@ -84,6 +88,11 @@ impl Default for Config {
             api_key: None,
             extra_body,
             prompt_cache_key: true,
+            // Venice honours "extended" (24 h instead of minutes) only on the
+            // models it serves from OpenAI (changelog, 2026). Other models
+            // ignore it; gpt-oss runs elsewhere, hence no plain "openai-gpt-".
+            prompt_cache_retention: Some("extended".into()),
+            prompt_cache_retention_models: vec!["openai-gpt-5".into(), "openai-gpt-6".into()],
             context_budget: 300_000,
             bash_timeout_s: 120,
             poc_timeout_s: 600,
@@ -128,6 +137,12 @@ impl Config {
             Ok(k) if !k.trim().is_empty() => Some(k.trim().to_string()),
             _ => self.api_key.clone().filter(|k| !k.is_empty()),
         }
+    }
+
+    /// The `prompt_cache_retention` to send for `model`, if any.
+    pub fn cache_retention(&self, model: &str) -> Option<&str> {
+        let supported = self.prompt_cache_retention_models.iter().any(|p| model.starts_with(p.as_str()));
+        self.prompt_cache_retention.as_deref().filter(|_| supported)
     }
 
     pub fn is_peak(&self, unix: u64) -> bool {
