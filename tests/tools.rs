@@ -370,3 +370,37 @@ fn config_rejects_unknown_keys_and_bad_toml() {
     // Empty file: all defaults.
     assert_eq!(Config::from_toml("").unwrap().model, Config::default().model);
 }
+
+#[test]
+fn editor_key_parses_and_rejects_bad_keys() {
+    use e::editor::parse_keys;
+    use rustyline::{KeyCode, KeyEvent, Modifiers};
+    assert_eq!(parse_keys("ctrl-x ctrl-e").unwrap(), vec![KeyEvent::ctrl('X'), KeyEvent::ctrl('E')]);
+    assert_eq!(parse_keys("Ctrl-G").unwrap(), vec![KeyEvent::ctrl('G')]);
+    assert_eq!(parse_keys("alt-e").unwrap(), vec![KeyEvent::alt('e')]);
+    assert_eq!(parse_keys("f2").unwrap(), vec![KeyEvent(KeyCode::F(2), Modifiers::NONE)]);
+    assert!(parse_keys("").unwrap().is_empty());
+    for bad in ["e", "ctrl-", "ctrl-gg", "f13", "ctrl-g ctrl-e", "ctrl-c", "ctrl-d", "shift-e"] {
+        assert!(parse_keys(bad).is_err(), "{bad}");
+    }
+    let err = Config::from_toml(r#"editor_key = "ctrl-g ctrl-e""#).err().unwrap();
+    assert!(err.contains("editor_key"), "{err}");
+    assert_eq!(Config::from_toml(r#"editor_key = "ctrl-g""#).unwrap().editor_key, "ctrl-g");
+}
+
+#[test]
+fn edit_round_trips_through_the_editor_command() {
+    let dir = tempdir("editor");
+    let script = dir.join("ed.sh");
+    std::fs::write(
+        &script,
+        "printf 'edited: ' > \"$1.new\"\ncat \"$1\" >> \"$1.new\"\nmv \"$1.new\" \"$1\"\n",
+    )
+    .unwrap();
+    // Through sh, so a command with arguments works.
+    let cmd = format!("sh {}", script.display());
+    assert_eq!(e::editor::edit(&cmd, "audit\nthe vault\n").unwrap(), "edited: audit\nthe vault");
+    assert_eq!(e::editor::edit("true", "kept\n").unwrap(), "kept");
+    let err = e::editor::edit("false", "x").err().unwrap();
+    assert!(err.contains("false exited"), "{err}");
+}
