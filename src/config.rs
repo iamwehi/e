@@ -25,8 +25,10 @@ pub struct Prices {
     pub off_peak: Option<Rate>,
 }
 
+/// Read from TOML. Every key is optional and replaces its default whole.
+/// Unknown keys are errors, so a typo cannot silently fall back to a default.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// Any OpenAI-compatible chat completions API; Venice by default.
     pub base_url: String,
@@ -40,7 +42,7 @@ pub struct Config {
     /// Send a per-session `prompt_cache_key` so requests reach a warm cache.
     pub prompt_cache_key: bool,
     /// `prompt_cache_retention` value, sent only for the model ids in
-    /// `prompt_cache_retention_models` (exact matches).
+    /// `prompt_cache_retention_models` (exact matches). Empty: never sent.
     pub prompt_cache_retention: Option<String>,
     pub prompt_cache_retention_models: Vec<String>,
     /// Context tokens per run (prompt + completion of the latest response).
@@ -123,20 +125,34 @@ pub fn config_dir() -> Option<PathBuf> {
 }
 
 impl Config {
-    /// `$E_CONFIG`, else `config.json` in [`config_dir`].
+    /// `$E_CONFIG`, else `config.toml` in [`config_dir`].
     pub fn path() -> Option<PathBuf> {
         match std::env::var_os("E_CONFIG") {
             Some(p) if !p.is_empty() => Some(PathBuf::from(p)),
-            _ => Some(config_dir()?.join("config.json")),
+            _ => Some(config_dir()?.join("config.toml")),
         }
     }
 
-    /// Defaults, overridden field by field by the config file if it exists.
+    /// Defaults, overridden key by key by the TOML in `text`.
+    pub fn from_toml(text: &str) -> Result<Config, String> {
+        toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())
+    }
+
+    /// Defaults, overridden key by key by the config file if it exists.
     pub fn load() -> Result<Config, String> {
         let Some(path) = Self::path() else { return Ok(Config::default()) };
         match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Ok(text) => Self::from_toml(&text).map_err(|e| format!("{}: {e}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // The config was JSON before; don't silently ignore an old one.
+                let old = path.with_file_name("config.json");
+                match std::env::var_os("E_CONFIG").is_none_or(|p| p.is_empty()) && old.exists() {
+                    true => {
+                        Err(format!("{} is no longer read: rewrite it as {}", old.display(), path.display()))
+                    }
+                    false => Ok(Config::default()),
+                }
+            }
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
     }
@@ -151,7 +167,7 @@ impl Config {
     /// The `prompt_cache_retention` to send for `model`, if any.
     pub fn cache_retention(&self, model: &str) -> Option<&str> {
         let supported = self.prompt_cache_retention_models.iter().any(|m| m == model);
-        self.prompt_cache_retention.as_deref().filter(|_| supported)
+        self.prompt_cache_retention.as_deref().filter(|r| supported && !r.is_empty())
     }
 
     pub fn is_peak(&self, unix: u64) -> bool {

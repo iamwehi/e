@@ -85,10 +85,17 @@ async fn loop_runs_tools_and_ends_on_a_reply_without_tool_calls() {
 #[tokio::test]
 async fn config_can_point_at_deepseek_instead() {
     let m = mock(vec![text_reply("ok", usage(10, 1))]).await;
-    let cfg: e::config::Config = serde_json::from_value(json!({
-        "base_url": m.url, "api_key_env": "E_TEST_UNSET_KEY", "api_key": "k",
-        "extra_body": {}, "prompt_cache_key": false, "model": "deepseek-flash"
-    }))
+    let cfg = e::config::Config::from_toml(&format!(
+        r#"
+        base_url = "{}"
+        api_key_env = "E_TEST_UNSET_KEY"
+        api_key = "k"
+        extra_body = {{}}
+        prompt_cache_key = false
+        model = "deepseek-flash"
+        "#,
+        m.url
+    ))
     .unwrap();
     let mut s = Session::new(cfg.clone(), cfg.model.clone(), tempdir("deepseek"), false).unwrap();
     assert_eq!(s.run("x", &Cancel::default(), &mut |_| {}).await, RunEnd::Done("ok".into()));
@@ -121,6 +128,9 @@ async fn extended_cache_retention_is_sent_only_for_supported_models() {
     }
     assert_eq!(cfg.cache_retention("deepseek-v4-1-flash"), None);
     let off = e::config::Config { prompt_cache_retention: None, ..cfg.clone() };
+    assert_eq!(off.cache_retention("openai-gpt-55"), None);
+    // TOML has no null: an empty string turns it off.
+    let off = e::config::Config::from_toml(r#"prompt_cache_retention = """#).unwrap();
     assert_eq!(off.cache_retention("openai-gpt-55"), None);
 
     let m = mock(vec![text_reply("a", usage(1, 1)), text_reply("b", usage(1, 1))]).await;
