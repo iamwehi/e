@@ -34,9 +34,33 @@ Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
 | --- | --- | --- |
 | `AUDIT.md` | you | Scope, trust assumptions, known issues, build and test commands. Appended to the system prompt. |
 | `NOTES.md` | the agent | Memory between runs. The harness never parses it. |
-| `skills/<name>/SKILL.md` | you | Frontmatter `name` and `description`. Also read from `~/.config/e/skills`. |
+| `skills/<name>/` | you | Project [skills](#skills). |
 | `runs/<timestamp>/` | harness | `transcript.jsonl`, plus `bash/` and `poc/` output logs. One per session. |
 | `findings/<id>.json` | `finding` tool | Status is `proven` only if `poc_cmd` exited 0 when the harness ran it. |
+
+## Skills
+
+Skills follow the [Agent Skills](https://agentskills.io/specification) format, so skills
+written for other agents work unchanged. A skill is a directory with a `SKILL.md` (YAML
+frontmatter with `name` and `description`, then instructions) and any other files it needs,
+conventionally under `scripts/`, `references/` and `assets/`.
+
+`e` looks in these directories, first match wins on a name clash:
+
+1. `.e/skills/` in the working directory
+2. `~/.config/e/skills/` (`$XDG_CONFIG_HOME/e/skills/`)
+3. `~/.agents/skills/`
+
+To install a skill, copy or symlink its directory into one of them. The target's own
+`.agents/skills/` and `.claude/skills/` are not read: they come with the code under audit,
+which is untrusted.
+
+The system prompt lists each skill's name, description and the absolute path of its
+`SKILL.md`. The model reads a `SKILL.md` when the skill fits the task, and loads the files it
+references on demand, resolving relative paths against the skill's directory. Skills are found
+when a session starts (launch or `/new`). Frontmatter that breaks the spec, such as a `name`
+that doesn't match its directory, produces a warning; a skill without a description or with
+unparseable frontmatter is skipped with a warning.
 
 ## Config
 

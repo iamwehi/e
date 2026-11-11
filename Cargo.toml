@@ -14,6 +14,7 @@ serde_json = "1"
 rustyline = { version = "19", default-features = false }
 # setsid/kill for process groups, termios save/restore, isatty.
 libc = "0.2"
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [profile.release]
 strip = true
