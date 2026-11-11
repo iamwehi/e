@@ -148,9 +148,10 @@ cargo vet --locked
 ```
 
 `deny.toml` holds the licence allow list and denies every RustSec advisory.
-`supply-chain/` holds cargo-vet's audits, the imported audit sets
-(Bytecode Alliance, Embark, Google, ISRG, Mozilla, Zcash) and exemptions for
-the crates none of them cover yet. After changing dependencies, run
+`supply-chain/` holds cargo-vet's audits, the imported audit sets (every
+organisation in cargo-vet's registry), trust in the crates.io publishers those
+organisations already trust (dtolnay, seanmonstar, ctz, ...), and exemptions
+for the crates none of that covers yet. After changing dependencies, run
 `cargo vet` (it fetches newer imports) and then either `cargo vet certify` or
 `cargo vet regenerate exemptions`.
 
