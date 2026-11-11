@@ -15,23 +15,31 @@ pub enum Resp {
     /// SSE data payloads, then the connection stalls.
     Stall(Vec<Value>),
     Status(u16, String),
+    /// SSE data payloads, then the connection closes without `[DONE]`.
+    Cut(Vec<Value>),
+    /// A 200 event-stream response with this exact body.
+    Raw(String),
 }
 
 pub struct Mock {
     pub url: String,
     pub requests: Arc<Mutex<Vec<Value>>>,
+    /// Request line and headers of each request, lowercased.
+    pub heads: Arc<Mutex<Vec<String>>>,
 }
 
 pub async fn mock(script: Vec<Resp>) -> Mock {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let reqs = requests.clone();
+    let heads = Arc::new(Mutex::new(Vec::new()));
+    let (reqs, hds) = (requests.clone(), heads.clone());
     tokio::spawn(async move {
         let mut script = script.into_iter();
         loop {
             let Ok((mut sock, _)) = listener.accept().await else { return };
-            let body = read_request(&mut sock).await;
+            let (head, body) = read_request(&mut sock).await;
+            hds.lock().unwrap().push(head);
             reqs.lock().unwrap().push(serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null));
             let resp = script.next().unwrap_or(Resp::Status(500, "script exhausted".into()));
             tokio::spawn(async move {
@@ -51,11 +59,16 @@ pub async fn mock(script: Vec<Resp>) -> Mock {
                         write_sse(&mut sock, &events).await;
                         tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                     }
+                    Resp::Cut(events) => write_sse(&mut sock, &events).await,
+                    Resp::Raw(body) => {
+                        write_sse(&mut sock, &[]).await;
+                        let _ = sock.write_all(body.as_bytes()).await;
+                    }
                 }
             });
         }
     });
-    Mock { url, requests }
+    Mock { url, requests, heads }
 }
 
 async fn write_sse(sock: &mut tokio::net::TcpStream, events: &[Value]) {
@@ -68,13 +81,13 @@ async fn write_sse(sock: &mut tokio::net::TcpStream, events: &[Value]) {
     }
 }
 
-async fn read_request(sock: &mut tokio::net::TcpStream) -> Vec<u8> {
+async fn read_request(sock: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 8192];
     loop {
         let n = sock.read(&mut tmp).await.unwrap_or(0);
         if n == 0 {
-            return Vec::new();
+            return (String::new(), Vec::new());
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -91,7 +104,7 @@ async fn read_request(sock: &mut tokio::net::TcpStream) -> Vec<u8> {
                 }
                 buf.extend_from_slice(&tmp[..n]);
             }
-            return buf[end + 4..].to_vec();
+            return (head, buf[end + 4..].to_vec());
         }
     }
 }
@@ -147,4 +160,14 @@ pub fn tempdir(tag: &str) -> PathBuf {
 
 pub fn config(url: &str) -> Config {
     Config { base_url: url.into(), api_key: Some("test-key".into()), ..Config::default() }
+}
+
+/// One stream chunk carrying `delta`.
+pub fn delta(d: Value) -> Value {
+    json!({"choices": [{"index": 0, "delta": d, "finish_reason": null}]})
+}
+
+/// The closing chunk of a reply.
+pub fn finish(reason: &str, u: Value) -> Value {
+    json!({"choices": [{"index": 0, "delta": {}, "finish_reason": reason}], "usage": u})
 }

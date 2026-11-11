@@ -49,3 +49,15 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
       - run: cargo deny --locked check
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@2201cc584a476d1b508be977bbe4b7d1c7a52e9c # v2.9.3
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - run: python3 scripts/pty_check.py
