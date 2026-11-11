@@ -237,11 +237,13 @@ struct BashArgs {
 
 async fn bash(ctx: &Ctx<'_>, a: BashArgs) -> Output {
     let secs = a.timeout_s.unwrap_or(ctx.cfg.bash_timeout_s as f64);
-    if !secs.is_finite() || secs <= 0.0 {
-        return Output::err(format!("timeout_s must be a positive number, got {secs}"));
-    }
+    // try_from: a huge value from the model must not panic the harness.
+    let timeout = match Duration::try_from_secs_f64(secs) {
+        Ok(t) if secs > 0.0 => t,
+        _ => return Output::err(format!("timeout_s must be a positive number, got {secs}")),
+    };
     let log = ctx.run_dir.join("bash").join(format!("{:04}.log", ctx.seq));
-    match exec::run(&a.command, ctx.cwd, Duration::from_secs_f64(secs), &log, ctx.cancel).await {
+    match exec::run(&a.command, ctx.cwd, timeout, &log, ctx.cancel).await {
         Ok(x) => Output { content: x.model_text(), is_error: !x.success(), summary: x.status_line() },
         Err(e) => Output::err(format!("failed to run command: {e}")),
     }
