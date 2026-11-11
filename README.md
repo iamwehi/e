@@ -51,6 +51,8 @@ defaults:
   "api_key_env": "VENICE_API_KEY",
   "extra_body": {"venice_parameters": {"include_venice_system_prompt": false}},
   "prompt_cache_key": true,
+  "prompt_cache_retention": "extended",
+  "prompt_cache_retention_models": ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"],
   "context_budget": 300000,
   "bash_timeout_s": 120,
   "poc_timeout_s": 600,
@@ -75,6 +77,16 @@ whenever you change `base_url`. `extra_body` is merged into every
 request; the default stops Venice from adding its own system prompt.
 `prompt_cache_key` sends a per-session key so requests reach a warm cache.
 
+Prompt caching is the provider's: `e` only keeps every request a stable
+prefix of the next. Caches expire after a few idle minutes (about 5 for
+DeepSeek models on Venice), so a long build or PoC run can cost one uncached
+turn. `prompt_cache_retention` is sent only for the model ids listed in
+`prompt_cache_retention_models`. Venice forwards `"extended"` (24 hours) to
+OpenAI and other models ignore it; OpenAI honours it only on GPT-5.5, 5.5 Pro,
+5.4 and 5.2 among the models Venice serves (GPT-5.6 and later control cache
+lifetime differently). It has no effect on the default model. Set
+`prompt_cache_retention` to `null` to never send it.
+
 To use DeepSeek's own API instead:
 
 ```json
@@ -84,6 +96,7 @@ To use DeepSeek's own API instead:
   "api_key_env": "DEEPSEEK_API_KEY",
   "extra_body": {},
   "prompt_cache_key": false,
+  "prompt_cache_retention": null,
   "peak_hours_utc": [[1, 4], [6, 10]],
   "prices": {
     "deepseek-flash": {"hit": 0.006, "miss": 0.3, "output": 1.2,

@@ -63,6 +63,8 @@ async fn loop_runs_tools_and_ends_on_a_reply_without_tool_calls() {
         assert!(r["prompt_cache_key"].as_str().unwrap().starts_with("e-"));
     }
     assert_eq!(reqs[0]["prompt_cache_key"], reqs[1]["prompt_cache_key"]);
+    // The default DeepSeek model has no extended cache retention on Venice.
+    assert!(reqs[0].get("prompt_cache_retention").is_none());
     assert!(s.meter.cost > 0.0, "default model is priced");
     let msgs = reqs[1]["messages"].as_array().unwrap();
     assert_eq!(msgs[2]["reasoning_content"], "plan");
@@ -97,6 +99,38 @@ async fn config_can_point_at_deepseek_instead() {
     let missing = e::config::Config { api_key: None, ..cfg };
     let err = Session::new(missing, "m".into(), tempdir("nokey"), false).err().unwrap();
     assert!(err.contains("E_TEST_UNSET_KEY is not set"), "{err}");
+}
+
+#[tokio::test]
+async fn extended_cache_retention_is_sent_only_for_supported_models() {
+    let cfg = config("http://127.0.0.1:1");
+    for m in ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"] {
+        assert_eq!(cfg.cache_retention(m), Some("extended"), "{m}");
+    }
+    // Not on OpenAI's extended-retention list, GPT-5.6+ (uses prompt_cache_options), open-weight.
+    for m in [
+        "openai-gpt-54-mini",
+        "openai-gpt-54-pro",
+        "openai-gpt-53-codex",
+        "openai-gpt-56-sol",
+        "openai-gpt-6-sol",
+        "openai-gpt-oss-120b",
+        "openai-gpt-4o-2024-11-20",
+    ] {
+        assert_eq!(cfg.cache_retention(m), None, "{m}");
+    }
+    assert_eq!(cfg.cache_retention("deepseek-v4-1-flash"), None);
+    let off = e::config::Config { prompt_cache_retention: None, ..cfg.clone() };
+    assert_eq!(off.cache_retention("openai-gpt-55"), None);
+
+    let m = mock(vec![text_reply("a", usage(1, 1)), text_reply("b", usage(1, 1))]).await;
+    let mut s = Session::new(config(&m.url), "openai-gpt-55".into(), tempdir("retention"), false).unwrap();
+    s.run("x", &Cancel::default(), &mut |_| {}).await;
+    s.model = "deepseek-v4-1-flash".into();
+    s.run("y", &Cancel::default(), &mut |_| {}).await;
+    let reqs = m.requests.lock().unwrap().clone();
+    assert_eq!(reqs[0]["prompt_cache_retention"], "extended");
+    assert!(reqs[1].get("prompt_cache_retention").is_none(), "/model switch drops it");
 }
 
 #[tokio::test]

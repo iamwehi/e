@@ -118,6 +118,9 @@ impl Session {
             let id = self.transcript.dir.file_name().map(|n| n.to_string_lossy().into_owned());
             body["prompt_cache_key"] = json!(format!("e-{}", id.unwrap_or_default()));
         }
+        if let Some(r) = self.cfg.cache_retention(&self.model) {
+            body["prompt_cache_retention"] = json!(r);
+        }
         for (k, v) in &self.cfg.extra_body {
             body[k] = v.clone();
         }
