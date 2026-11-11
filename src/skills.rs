@@ -4,7 +4,7 @@
 //! Only `name` and `description` go into the system prompt. The model activates a skill by
 //! reading its `SKILL.md` with the `read` tool and loads bundled files (`scripts/`,
 //! `references/`, `assets/`, ...) the same way, resolving relative paths against the skill
-//! directory. Validation is lenient, as the client guide recommends: a spec violation that
+//! directory. The user activates one with `/name`, which sends its instructions ([`activate`]). Validation is lenient, as the client guide recommends: a spec violation that
 //! doesn't stop a skill from working is a warning; a skill without a description or with
 //! unparseable frontmatter is skipped.
 
@@ -24,6 +24,8 @@ pub struct Skill {
     pub description: String,
     /// Absolute path to `SKILL.md`. Its parent is the skill directory.
     pub location: PathBuf,
+    /// `disable-model-invocation`: left out of the catalog, so only `/name` starts it.
+    pub user_only: bool,
 }
 
 /// Skill roots, highest precedence first: `<cwd>/.e/skills`, then the user-level
@@ -92,7 +94,8 @@ pub fn discover(roots: &[PathBuf], warnings: &mut Vec<String>) -> Vec<Skill> {
                 continue;
             }
             warnings.extend(parsed.problems.iter().map(|p| format!("{shown}: {p}")));
-            skills.push(Skill { name: parsed.name, description: parsed.description, location });
+            let Parsed { name, description, user_only, .. } = parsed;
+            skills.push(Skill { name, description, location, user_only });
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -104,12 +107,13 @@ pub fn discover(roots: &[PathBuf], warnings: &mut Vec<String>) -> Vec<Skill> {
 pub struct Parsed {
     pub name: String,
     pub description: String,
+    pub user_only: bool,
     pub problems: Vec<String>,
 }
 
 /// Parse `SKILL.md` text from the directory `dir_name`. Errors mean the skill is unusable.
 pub fn parse(text: &str, dir_name: &str) -> Result<Parsed, String> {
-    let yaml = split(text).ok_or("no YAML frontmatter (a leading `---` block)")?;
+    let (yaml, _) = split(text).ok_or("no YAML frontmatter (a leading `---` block)")?;
     let mut problems = Vec::new();
     let map = match load_yaml(yaml) {
         Ok(map) => map,
@@ -134,16 +138,13 @@ pub fn parse(text: &str, dir_name: &str) -> Result<Parsed, String> {
             None => return Err("description must be a string (quote it if it contains \": \")".into()),
         },
     };
-    // Other clients use this for skills only the user may start; e has no way to do that, and
-    // the client guide says to hide such skills from the model.
+    // Skills only the user may start, with `/name`. The client guide says to hide them from
+    // the model entirely.
     let user_only = match field("disable-model-invocation") {
         Some(Yaml::Boolean(b)) => *b,
         Some(Yaml::String(s)) => s.trim().eq_ignore_ascii_case("true"),
         _ => false,
     };
-    if user_only {
-        return Err("disable-model-invocation is set, and e has no way for the user to start a skill".into());
-    }
     let name = match field("name") {
         Some(Yaml::String(n)) if !n.trim().is_empty() => n.trim().to_string(),
         None | Some(Yaml::Null) | Some(Yaml::String(_)) => {
@@ -194,12 +195,14 @@ pub fn parse(text: &str, dir_name: &str) -> Result<Parsed, String> {
         Some(Yaml::Hash(m)) if m.iter().all(|(k, v)| k.as_str().is_some() && v.as_str().is_some()) => {}
         Some(_) => problems.push("metadata must map string keys to string values".into()),
     }
-    Ok(Parsed { name, description, problems })
+    Ok(Parsed { name, description, user_only, problems })
 }
 
-/// The skills section of the system prompt: how to use skills, then the catalog. Empty when
-/// there are no skills, so the model isn't told about a feature it can't use.
+/// The skills section of the system prompt: how to use skills, then the catalog of skills the
+/// model may start. Empty when there are none, so the model isn't told about a feature it
+/// can't use.
 pub fn catalog(skills: &[Skill]) -> String {
+    let skills: Vec<&Skill> = skills.iter().filter(|s| !s.user_only).collect();
     if skills.is_empty() {
         return String::new();
     }
@@ -226,8 +229,70 @@ working directory, so pass them absolute paths.
     out
 }
 
-/// The YAML between a first line of `---` and the next `---` line.
-fn split(text: &str) -> Option<&str> {
+/// At most this many bundled files are listed when a skill is activated.
+const MAX_RESOURCES: usize = 50;
+
+/// The message that activates `skill` for the user's `/name`: the `SKILL.md` body, read now
+/// so edits since startup count, then the skill directory and its bundled files (listed, not
+/// read; the model loads what the instructions call for).
+pub fn activate(skill: &Skill) -> Result<String, String> {
+    let shown = skill.location.display();
+    match std::fs::metadata(&skill.location) {
+        Ok(m) if m.len() > MAX_SKILL_MD => return Err(format!("{shown}: larger than {MAX_SKILL_MD} bytes")),
+        Ok(_) => {}
+        Err(e) => return Err(format!("{shown}: {e}")),
+    }
+    let text = std::fs::read_to_string(&skill.location).map_err(|e| format!("{shown}: {e}"))?;
+    let (_, body) = split(&text).ok_or_else(|| format!("{shown}: no YAML frontmatter"))?;
+    let dir = skill.location.parent().unwrap_or(Path::new("/"));
+    let mut files = Vec::new();
+    let more = list_files(dir, Path::new(""), 0, &mut files);
+    let mut out = format!(
+        "<skill_content name=\"{}\">\n{}\n\nSkill directory: {}\nRelative paths in this skill are relative to the skill directory.\n",
+        xml_escape(&skill.name).replace('"', "&quot;"),
+        body.trim(),
+        dir.display(),
+    );
+    if !files.is_empty() {
+        out.push_str("\n<skill_resources>\n");
+        for f in &files {
+            out.push_str(&format!("<file>{}</file>\n", xml_escape(&f.display().to_string())));
+        }
+        if more {
+            out.push_str(&format!("(more files not listed; only the first {MAX_RESOURCES} are)\n"));
+        }
+        out.push_str("</skill_resources>\n");
+    }
+    out.push_str("</skill_content>");
+    Ok(out)
+}
+
+/// Add files under `dir` to `files` as paths relative to the skill directory, sorted, skipping
+/// hidden entries and the top-level `SKILL.md`, at most four levels deep. True if the listing
+/// hit [`MAX_RESOURCES`].
+fn list_files(dir: &Path, rel: &Path, depth: usize, files: &mut Vec<PathBuf>) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let mut entries: Vec<_> =
+        entries.flatten().filter(|e| !e.file_name().to_string_lossy().starts_with('.')).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let (path, rel) = (e.path(), rel.join(e.file_name()));
+        if path.is_dir() {
+            if depth < 3 && list_files(&path, &rel, depth + 1, files) {
+                return true;
+            }
+        } else if rel != Path::new("SKILL.md") {
+            if files.len() == MAX_RESOURCES {
+                return true;
+            }
+            files.push(rel);
+        }
+    }
+    false
+}
+
+/// The YAML between a first line of `---` and the next `---` line, and the body after it.
+fn split(text: &str) -> Option<(&str, &str)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
     let first = lines.next()?;
@@ -237,7 +302,7 @@ fn split(text: &str) -> Option<&str> {
     let mut end = first.len();
     for line in lines {
         if line.trim_end() == "---" {
-            return Some(&text[first.len()..end]);
+            return Some((&text[first.len()..end], &text[end + line.len()..]));
         }
         end += line.len();
     }

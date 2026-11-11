@@ -4,9 +4,11 @@
 use crate::config::{Config, Meter};
 use crate::exec::Cancel;
 use crate::provider::{Client, Delta, End, FunctionCall, Message, ToolCall};
+use crate::skills::{self, Skill};
 use crate::transcript::{Transcript, now_unix};
 use crate::{prompt, tools};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -60,6 +62,10 @@ pub struct Session {
     pub meter: Meter,
     pub transcript: Transcript,
     pub warnings: Vec<String>,
+    /// Every skill found, including those only the user may start.
+    pub skills: Vec<Skill>,
+    /// Skills whose instructions are already in history.
+    activated: HashSet<String>,
     /// Context size after the latest response (prompt + completion tokens).
     pub context_tokens: u64,
     client: Client,
@@ -71,7 +77,10 @@ impl Session {
     pub fn new(cfg: Config, model: String, cwd: PathBuf, echo_json: bool) -> Result<Self, String> {
         let key = cfg.api_key().ok_or_else(|| format!("{} is not set", cfg.api_key_env))?;
         let client = Client::new(&cfg.base_url, key)?;
-        let (system, warnings) = prompt::build(&cwd, &crate::transcript::today());
+        let mut warnings = Vec::new();
+        let skills = skills::discover(&skills::roots(&cwd), &mut warnings);
+        let (system, prompt_warnings) = prompt::build(&cwd, &crate::transcript::today(), &skills);
+        warnings.extend(prompt_warnings);
         let tools = tools::schemas();
         let mut transcript =
             Transcript::create(&cwd, echo_json).map_err(|e| format!("cannot create .e/runs: {e}"))?;
@@ -89,11 +98,35 @@ impl Session {
             meter: Meter::default(),
             transcript,
             warnings,
+            skills,
+            activated: HashSet::new(),
             context_tokens: 0,
             client,
             tools,
             seq: 0,
         })
+    }
+
+    /// The user message for `/name task`: the skill's instructions, then the task. Once a skill
+    /// is in history, a later `/name` refers back to it instead of repeating it. `None` if no
+    /// skill has that name.
+    pub fn skill_message(&mut self, name: &str, task: &str) -> Option<Result<String, String>> {
+        let skill = self.skills.iter().find(|s| s.name == name)?;
+        let loaded = if self.activated.contains(name) {
+            format!("(The {name} skill's instructions are above.)")
+        } else {
+            match skills::activate(skill) {
+                Ok(content) => {
+                    self.activated.insert(name.to_string());
+                    content
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        };
+        Some(Ok(match task.trim() {
+            "" => format!("{loaded}\n\nThe user started the {name} skill."),
+            task => format!("{loaded}\n\n{task}"),
+        }))
     }
 
     fn body(&self) -> Value {

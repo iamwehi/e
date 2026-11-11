@@ -1,7 +1,7 @@
 //! The system prompt: fixed text, the skills catalog and the audit brief.
 
-use crate::skills;
-use std::path::{Path, PathBuf};
+use crate::skills::{self, Skill};
+use std::path::Path;
 
 const TEMPLATE: &str = "You are a security auditor working in a sandboxed copy of a
 codebase. Your job is to find vulnerabilities a real
@@ -60,16 +60,11 @@ Date: {date}
 {contents of .e/AUDIT.md}
 </audit_brief>";
 
-/// Build the system prompt, with skills from [`skills::roots`]. Returns the prompt and
-/// warnings for the user.
-pub fn build(cwd: &Path, date: &str) -> (String, Vec<String>) {
-    build_with(cwd, date, &skills::roots(cwd))
-}
-
-/// [`build`] with explicit skill roots, highest precedence first.
-pub fn build_with(cwd: &Path, date: &str, skill_roots: &[PathBuf]) -> (String, Vec<String>) {
+/// Build the system prompt with the catalog of `skills`. Returns the prompt and warnings for
+/// the user.
+pub fn build(cwd: &Path, date: &str, skills: &[Skill]) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
-    let mut skills = skills::catalog(&skills::discover(skill_roots, &mut warnings));
+    let mut skills = skills::catalog(skills);
     if !skills.is_empty() {
         skills.push_str("\n\n");
     }

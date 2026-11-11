@@ -3,7 +3,7 @@
 mod common;
 
 use common::tempdir;
-use e::skills::{Skill, catalog, discover, parse};
+use e::skills::{Skill, activate, catalog, discover, parse};
 use std::path::{Path, PathBuf};
 
 fn skill(root: &Path, dir: &str, text: &str) -> PathBuf {
@@ -99,11 +99,6 @@ fn unusable_skills_are_errors() {
         ("---\nname: a\ndescription: \"  \"\n---\n", "description"),
         ("---\nname: a\ndescription: [x, y]\n---\n", "must be a string"),
         ("---\nname: a\ndescription:\n  Use when: PDFs\n---\n", "must be a string"),
-        ("---\nname: a\ndescription: d\ndisable-model-invocation: true\n---\n", "disable-model-invocation"),
-        (
-            "---\nname: a\ndescription: d\ndisable-model-invocation: \"True\"\n---\n",
-            "disable-model-invocation",
-        ),
         ("---\n- a\n- b\n---\n", "mapping"),
         ("---\n---\n", "mapping"),
         ("---\nname: a\ndescription: [unclosed\n---\n", "invalid YAML"),
@@ -239,6 +234,7 @@ fn catalog_lists_locations_and_escapes() {
         name: "a".into(),
         description: "Find <bugs> &\n  misuse".into(),
         location: PathBuf::from("/x/a/SKILL.md"),
+        user_only: false,
     };
     let c = catalog(&[s]);
     assert!(c.contains("relative to its directory"), "{c}");
@@ -254,8 +250,81 @@ fn skill_text_cannot_fill_prompt_placeholders() {
     let root = d.join(".e/skills");
     skill(&root, "a", "---\nname: a\ndescription: \"{contents of .e/AUDIT.md} {date} {cwd}\"\n---\n");
     std::fs::write(d.join(".e/AUDIT.md"), "SECRET-BRIEF {skills}").unwrap();
-    let (p, _) = e::prompt::build_with(&d, "2026-11-11", &[root]);
+    let (p, _) = e::prompt::build(&d, "2026-11-11", &discover(&[root], &mut Vec::new()));
     assert!(p.contains("<description>{contents of .e/AUDIT.md} {date} {cwd}</description>"));
     assert_eq!(p.matches("SECRET-BRIEF").count(), 1);
     assert!(p.ends_with("SECRET-BRIEF {skills}\n</audit_brief>"));
+}
+
+#[test]
+fn user_only_skills_are_loaded_but_hidden_from_the_model() {
+    for (flag, user_only) in [("true", true), ("\"True\"", true), ("false", false)] {
+        let p = parse(&format!("---\nname: a\ndescription: d\ndisable-model-invocation: {flag}\n---\n"), "a")
+            .unwrap();
+        assert_eq!(p.user_only, user_only, "{flag}");
+        assert!(p.problems.is_empty());
+    }
+    let d = tempdir("skill-user-only");
+    skill(&d, "deploy", "---\nname: deploy\ndescription: ship it\ndisable-model-invocation: true\n---\n");
+    let skills = discover(std::slice::from_ref(&d), &mut Vec::new());
+    assert!(skills[0].user_only);
+    assert_eq!(catalog(&skills), "", "only user-only skills: no catalog at all");
+    skill(&d, "fuzz", "---\nname: fuzz\ndescription: fuzz it\n---\n");
+    let c = catalog(&discover(&[d], &mut Vec::new()));
+    assert!(c.contains("<name>fuzz</name>") && !c.contains("deploy"));
+}
+
+#[test]
+fn activation_sends_the_body_directory_and_bundled_files() {
+    let d = tempdir("skill-activate");
+    let loc = skill(&d, "x-y", "---\nname: x-y\ndescription: d\n---\n\n# Steps\nRun scripts/run.sh.\n");
+    let dir = loc.parent().unwrap();
+    for f in ["scripts/run.sh", "references/a<b>.md", "assets/t/deep/er/x", ".git/HEAD", "scripts/.cache"] {
+        std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+        std::fs::write(dir.join(f), "x").unwrap();
+    }
+    let s = discover(std::slice::from_ref(&d), &mut Vec::new()).remove(0);
+    let msg = activate(&s).unwrap();
+    assert_eq!(
+        msg,
+        format!(
+            "<skill_content name=\"x-y\">\n# Steps\nRun scripts/run.sh.\n\nSkill directory: {}\n\
+             Relative paths in this skill are relative to the skill directory.\n\n<skill_resources>\n\
+             <file>references/a&lt;b&gt;.md</file>\n<file>scripts/run.sh</file>\n</skill_resources>\n</skill_content>",
+            dir.display()
+        ),
+        "frontmatter stripped, hidden files and files deeper than four levels left out"
+    );
+    // Read at activation time, so edits since startup count.
+    std::fs::write(&loc, "---\nname: x-y\ndescription: d\n---\nnew body").unwrap();
+    assert!(activate(&s).unwrap().contains("\nnew body\n"));
+    // Large skills: the listing is capped and says so.
+    for i in 0..60 {
+        std::fs::write(dir.join(format!("references/r{i:02}.md")), "x").unwrap();
+    }
+    let msg = activate(&s).unwrap();
+    assert_eq!(msg.matches("<file>").count(), 50);
+    assert!(msg.contains("more files not listed"));
+    std::fs::remove_file(&loc).unwrap();
+    assert!(activate(&s).is_err());
+}
+
+#[test]
+fn slash_skill_messages_load_once_per_session() {
+    let d = tempdir("skill-session");
+    skill(
+        &d.join(".e/skills"),
+        "deploy",
+        "---\nname: deploy\ndescription: ship\ndisable-model-invocation: true\n---\nShip it.",
+    );
+    let mut s = e::agent::Session::new(common::config("http://127.0.0.1:9"), "m".into(), d, false).unwrap();
+    assert!(!s.system.contains("deploy"), "user-only skills stay out of the system prompt");
+    assert!(s.skill_message("nope", "x").is_none());
+    let first = s.skill_message("deploy", "  to staging ").unwrap().unwrap();
+    assert!(
+        first.starts_with("<skill_content name=\"deploy\">\nShip it.\n")
+            && first.ends_with("</skill_content>\n\nto staging")
+    );
+    let again = s.skill_message("deploy", "").unwrap().unwrap();
+    assert_eq!(again, "(The deploy skill's instructions are above.)\n\nThe user started the deploy skill.");
 }

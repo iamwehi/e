@@ -305,7 +305,10 @@ fn skills_frontmatter_and_prompt() {
     .unwrap();
     std::fs::create_dir_all(root.join("broken")).unwrap();
     std::fs::write(root.join("broken/SKILL.md"), "no frontmatter").unwrap();
-    let (p, warnings) = e::prompt::build_with(&d, "2026-11-11", std::slice::from_ref(&root));
+    let mut warnings = Vec::new();
+    let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    warnings.extend(more);
     assert!(p.contains(&format!(
         "<skill>\n<name>reentrancy</name>\n<description>Checks for reentrancy</description>\n\
          <location>{}</location>\n</skill>",
@@ -316,12 +319,15 @@ fn skills_frontmatter_and_prompt() {
     assert!(warnings.iter().any(|w| w.contains("AUDIT.md")));
     assert!(warnings.iter().any(|w| w.contains("broken")));
     std::fs::write(d.join(".e/AUDIT.md"), "Scope: src/\n").unwrap();
-    let (p, warnings) = e::prompt::build_with(&d, "2026-11-11", std::slice::from_ref(&root));
+    let mut warnings = Vec::new();
+    let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    warnings.extend(more);
     assert!(p.ends_with("</available_skills>\n\n<audit_brief>\nScope: src/\n</audit_brief>"));
     assert!(!warnings.iter().any(|w| w.contains("AUDIT.md")));
 
     // No skills: no catalog and no instructions about skills.
-    let (p, _) = e::prompt::build_with(&d, "2026-11-11", &[d.join("nowhere")]);
+    let (p, _) = e::prompt::build(&d, "2026-11-11", &[]);
     assert!(!p.contains("available_skills") && !p.contains("SKILL.md"));
     assert!(p.contains("Date: 2026-11-11\n\n<audit_brief>"));
 }

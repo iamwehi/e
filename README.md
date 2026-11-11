@@ -20,9 +20,11 @@ cd path/to/target && e
 ```bash
 e -p "Audit src/Vault.sol"            # headless: prints the final message
 e -p "Audit src/Vault.sol" --json     # headless: transcript events as JSON lines
+e -p "/reentrancy Audit src/Vault.sol" # start a skill, then the task
 ```
 
-At the prompt: `/model <id>`, `/new`. Ctrl-C cancels a run, Ctrl-D exits.
+At the prompt: `/model <id>`, `/new`, `/skills`, `/<skill> [task]` (Tab completes names).
+Ctrl-C cancels a run, Ctrl-D exits.
 `--verbose` shows reasoning and full tool output.
 
 Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
@@ -58,10 +60,17 @@ which is untrusted.
 The system prompt lists each skill's name, description and the absolute path of its
 `SKILL.md`. The model reads a `SKILL.md` when the skill fits the task, and loads the files it
 references on demand, resolving relative paths against the skill's directory. Skills are found
-when a session starts (launch or `/new`). Frontmatter that breaks the spec, such as a `name`
-that doesn't match its directory, produces a warning. A skill is skipped, with a warning, if
-it has no description, its frontmatter can't be parsed, or it sets `disable-model-invocation`
-(`e` has no way for you to start a skill yourself).
+when a session starts (launch or `/new`); `/skills` lists them.
+
+You can also start a skill yourself: `/<name> [task]`, at the prompt or as the start of a `-p`
+task. `e` sends the `SKILL.md` instructions (read at that moment, frontmatter removed), the
+skill's directory and a list of its files, then your task. Starting the same skill again in a
+session refers back to it instead of repeating it. A skill with `disable-model-invocation:
+true` is left out of the system prompt, so only you can start it. `/model`, `/new` and
+`/skills` take precedence over skills of the same name. In a `-p` task, `/word` that names no
+skill is sent as written, so a task can start with a path. Frontmatter that breaks the spec, such as a `name`
+that doesn't match its directory, produces a warning. A skill without a description or with
+frontmatter that can't be parsed is skipped with a warning.
 
 ## Config
 
