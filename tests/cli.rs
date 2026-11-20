@@ -96,12 +96,16 @@ async fn help_and_bad_arguments() {
         (&["-p"], "e: -p needs a task"),
         (&["-p", "x", "--model"], "e: --model needs an id"),
         (&["stray"], "e: unknown argument: stray"),
+        (&["report", "-p"], "e: unknown argument: -p"),
     ] {
         let o = run(e_cmd(&env, args)).await;
         assert_eq!(o.code, Some(2), "{args:?}");
         assert!(o.stderr.starts_with(&format!("{msg}\nusage: e ")), "{args:?}: {}", o.stderr);
     }
     assert!(!env.proj.join(".e").exists(), "bad arguments create no run directory");
+    let o = run(e_cmd(&env, &["report"])).await;
+    assert_eq!((o.code, o.stdout.as_str()), (Some(0), "# Findings\n\nNo findings recorded.\n"));
+    assert!(!env.proj.join(".e").exists(), "report creates nothing");
 }
 
 #[tokio::test]
@@ -191,6 +195,17 @@ async fn headless_audit_proves_a_finding_end_to_end() {
     let tools: Vec<&str> =
         t.iter().filter(|e| e["type"] == "tool_result").map(|e| e["name"].as_str().unwrap()).collect();
     assert_eq!(tools, ["read", "write", "bash", "finding"]);
+
+    // `e report` needs no key or API, and starts no run.
+    let mut c = e_cmd(&env, &["report"]);
+    c.env_remove("VENICE_API_KEY").env("E_CONFIG", env.proj.join("missing.toml"));
+    let o = run(c).await;
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert!(o.stderr.is_empty(), "{}", o.stderr);
+    assert!(o.stdout.starts_with("# Findings\n\n1 finding: 1 proven, 0 suspected."), "{}", o.stdout);
+    assert!(o.stdout.contains("| [F-001](#finding-f-001) | critical | proven | Reentrancy in withdraw |"));
+    assert!(o.stdout.contains("Command: `bash test/poc.sh`"), "{}", o.stdout);
+    assert_eq!(run_dirs(&env.proj).len(), 1);
 }
 
 #[tokio::test]
@@ -321,6 +336,55 @@ async fn api_key_comes_from_the_environment_then_the_config() {
     assert_eq!(o.stderr, "e: E_TEST_KEY is not set\n");
     assert_eq!(m.requests.lock().unwrap().len(), 3);
     assert!(!env.proj.join(".e").exists());
+}
+
+/// The API key must not reach the code under audit: neither `bash` commands nor PoC runs see
+/// `api_key_env` or the `scrub_env` variables; other variables pass through.
+#[tokio::test]
+async fn commands_do_not_see_the_api_key() {
+    let probe = "echo \"k=${VENICE_API_KEY-unset} d=${DEEPSEEK_API_KEY-unset} m=${E_MY_KEY-unset} \
+                 o=${E_OTHER-unset} keep=${E_KEEP-unset}\"";
+    let poc = "[ -z \"${VENICE_API_KEY+x}${DEEPSEEK_API_KEY+x}\" ] && echo clean";
+    let script = || {
+        vec![
+            tool_reply(&[("c1", "bash", json!({"command": probe}))], usage(10, 5)),
+            tool_reply(
+                &[(
+                    "c2",
+                    "finding",
+                    json!({"title": "t", "severity": "low", "class": "c", "file": "f", "function": "g",
+                           "lines": "1", "description": "d", "attack_path": "a", "impact": "i",
+                           "poc_cmd": poc}),
+                )],
+                usage(20, 5),
+            ),
+            text_reply("done", usage(30, 5)),
+        ]
+    };
+    let m = mock(script()).await;
+    let env = project("scrub", &m.url, "");
+    let mut c = e_cmd(&env, &["-p", "x"]);
+    c.env("DEEPSEEK_API_KEY", "ds").env("E_KEEP", "kept");
+    let o = run(c).await;
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    let reqs = m.requests.lock().unwrap().clone();
+    let out = reqs[1]["messages"][3]["content"].as_str().unwrap();
+    assert!(out.starts_with("k=unset d=unset m=unset o=unset keep=kept\n"), "{out}");
+    let rec: Value =
+        serde_json::from_str(&std::fs::read_to_string(env.proj.join(".e/findings/F-001.json")).unwrap())
+            .unwrap();
+    assert_eq!(rec["status"], "proven", "{rec}");
+
+    // A custom api_key_env is removed too; scrub_env replaces the default list.
+    let m = mock(script()).await;
+    let env = project("scrub2", &m.url, "api_key_env = \"E_MY_KEY\"\nscrub_env = [\"E_OTHER\"]\n");
+    let mut c = e_cmd(&env, &["-p", "x"]);
+    c.env("E_MY_KEY", "mine").env("E_OTHER", "other").env("E_KEEP", "kept");
+    assert_eq!(run(c).await.code, Some(0));
+    let reqs = m.requests.lock().unwrap().clone();
+    let out = reqs[1]["messages"][3]["content"].as_str().unwrap();
+    assert!(out.starts_with("k=test-key d=unset m=unset o=unset keep=kept\n"), "{out}");
+    assert!(m.heads.lock().unwrap()[0].contains("authorization: bearer mine"));
 }
 
 #[tokio::test]

@@ -5,7 +5,8 @@
 //! and stderr both written straight to a log file. Nothing is buffered in
 //! memory; the result carries the last [`TAIL_BYTES`] of the file. When the
 //! shell exits, times out or is interrupted, the whole group is killed, so
-//! nothing a command starts outlives the tool call.
+//! nothing a command starts outlives the tool call. The variables named in
+//! `env_remove` (the API key) are taken out of the command's environment.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -133,6 +134,7 @@ pub async fn run(
     cwd: &Path,
     timeout: Duration,
     log_path: &Path,
+    env_remove: &[&str],
     cancel: &Cancel,
 ) -> std::io::Result<Exec> {
     if let Some(dir) = log_path.parent() {
@@ -146,6 +148,9 @@ pub async fn run(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    for name in env_remove {
+        cmd.env_remove(name);
+    }
     // SAFETY: setsid is async-signal-safe and touches no parent state.
     unsafe {
         cmd.pre_exec(|| {
