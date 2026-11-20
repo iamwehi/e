@@ -97,6 +97,13 @@ async fn help_and_bad_arguments() {
         (&["-p", "x", "--model"], "e: --model needs an id"),
         (&["stray"], "e: unknown argument: stray"),
         (&["report", "-p"], "e: unknown argument: -p"),
+        (&["report", "F-1"], "e: unknown argument: F-1"),
+        (&["verify", "--model", "m"], "e: unknown argument: --model"),
+        (&["triage", "-p", "x"], "e: unknown argument: -p"),
+        (&["--rounds", "2"], "e: --rounds needs -p"),
+        (&["-p", "x", "--rounds", "0"], "e: --rounds needs a positive whole number, got 0"),
+        (&["-p", "x", "--max-cost", "-1"], "e: --max-cost needs a positive amount in USD, got -1"),
+        (&["-p", "x", "--max-cost"], "e: --max-cost needs an amount in USD"),
     ] {
         let o = run(e_cmd(&env, args)).await;
         assert_eq!(o.code, Some(2), "{args:?}");
@@ -203,7 +210,9 @@ async fn headless_audit_proves_a_finding_end_to_end() {
     assert_eq!(o.code, Some(0), "{}", o.stderr);
     assert!(o.stderr.is_empty(), "{}", o.stderr);
     assert!(o.stdout.starts_with("# Findings\n\n1 finding: 1 proven, 0 suspected."), "{}", o.stdout);
-    assert!(o.stdout.contains("| [F-001](#finding-f-001) | critical | proven | Reentrancy in withdraw |"));
+    assert!(
+        o.stdout.contains("| [F-001](#finding-f-001) | critical | proven | - | Reentrancy in withdraw |")
+    );
     assert!(o.stdout.contains("Command: `bash test/poc.sh`"), "{}", o.stdout);
     assert_eq!(run_dirs(&env.proj).len(), 1);
 }
@@ -385,6 +394,135 @@ async fn commands_do_not_see_the_api_key() {
     let out = reqs[1]["messages"][3]["content"].as_str().unwrap();
     assert!(out.starts_with("k=test-key d=unset m=unset o=unset keep=kept\n"), "{out}");
     assert!(m.heads.lock().unwrap()[0].contains("authorization: bearer mine"));
+}
+
+/// `--rounds`: a session that runs out of room is followed by a new one that continues from
+/// NOTES.md; a session that finishes on its own ends the loop.
+#[tokio::test]
+async fn rounds_continue_until_a_session_finishes() {
+    let m = mock(vec![
+        // Round 1: the context runs out mid-task.
+        tool_reply(&[("c1", "bash", json!({"command": "touch r1"}))], usage(990, 20)),
+        // Round 2: warned near the budget, writes notes, stops.
+        tool_reply(&[("c2", "bash", json!({"command": "echo notes > .e/NOTES.md"}))], usage(860, 0)),
+        text_reply("out of room", usage(870, 5)),
+        // Round 3: finishes on its own.
+        text_reply("all done", usage(100, 5)),
+        text_reply("never sent", usage(1, 1)),
+    ])
+    .await;
+    let env = project("rounds", &m.url, "context_budget = 1000\n");
+    let o = run(e_cmd(&env, &["-p", "/x Audit it", "--rounds", "5"])).await;
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert_eq!(o.stdout, "all done\n");
+    assert!(o.stderr.contains("round 2/5: new session") && o.stderr.contains("round 3/5"), "{}", o.stderr);
+    assert!(!env.proj.join("r1").exists(), "the call past the budget was not run");
+    assert_eq!(run_dirs(&env.proj).len(), 3);
+    let reqs = m.requests.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 4);
+    for r in [&reqs[1], &reqs[3]] {
+        let msgs = r["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "a fresh session");
+        let text = msgs[1]["content"].as_str().unwrap();
+        assert!(text.starts_with("[harness] Round ") && text.contains("Read .e/NOTES.md first"), "{text}");
+        assert!(text.ends_with("The task:\n\n/x Audit it"), "{text}");
+    }
+
+    // The last round ends the loop whatever happened.
+    let m = mock(vec![tool_reply(&[("c1", "bash", json!({"command": "true"}))], usage(990, 20))]).await;
+    let env = project("rounds1", &m.url, "context_budget = 1000\n");
+    let o = run(e_cmd(&env, &["-p", "x", "--rounds", "1"])).await;
+    assert_eq!(o.code, Some(2));
+}
+
+#[tokio::test]
+async fn max_cost_flag_overrides_the_config_and_exits_3() {
+    let prices =
+        "max_cost_usd = 100.0\n[prices.deepseek-v4-1-flash]\nhit = 1000.0\nmiss = 1000.0\noutput = 1000.0\n";
+    let m = mock(vec![
+        tool_reply(&[("c1", "bash", json!({"command": "touch ran"}))], usage(1000, 50)),
+        text_reply("never sent", usage(1, 1)),
+    ])
+    .await;
+    let env = project("maxcost", &m.url, prices);
+    let o = run(e_cmd(&env, &["-p", "x", "--max-cost", "$1"])).await;
+    assert_eq!(o.code, Some(3), "{}", o.stderr);
+    assert!(o.stderr.contains("e: cost limit reached: $1.0500 of $1.00"), "{}", o.stderr);
+    assert!(!env.proj.join("ran").exists());
+    let t = transcript(&run_dirs(&env.proj)[0]);
+    assert_eq!(t.last().unwrap()["end"]["status"], "cost_limit");
+
+    let env = project("badcost", &m.url, "max_cost_usd = 0.0\n");
+    let o = run(e_cmd(&env, &["-p", "x"])).await;
+    assert_eq!(o.code, Some(1));
+    assert!(o.stderr.contains("max_cost_usd must be a positive number"), "{}", o.stderr);
+}
+
+#[tokio::test]
+async fn verify_and_triage_from_the_command_line() {
+    let env = project("verifycli", "http://127.0.0.1:1", "");
+    let d = &env.proj;
+    let git = |cmd: &str| {
+        let ok = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(d)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{cmd}");
+    };
+    std::fs::write(d.join("V.sol"), "bug\n").unwrap();
+    git("git init -q && git add V.sol && git commit -qm init");
+    let o = run(e_cmd(&env, &["verify"])).await;
+    assert_eq!((o.code, o.stdout.as_str()), (Some(0), "no findings to verify\n"), "{}", o.stderr);
+    std::fs::create_dir_all(d.join(".e/findings")).unwrap();
+    let rec = |id: &str, poc: &str| {
+        json!({"id": id, "title": "t", "severity": "high", "status": "proven", "class": "c", "file": "V.sol",
+               "function": "f", "lines": "1", "description": "d", "attack_path": "a", "impact": "i",
+               "poc_cmd": poc})
+    };
+    std::fs::write(d.join(".e/findings/A.json"), rec("A", "grep -q bug V.sol").to_string()).unwrap();
+    // Needs a file the finding never kept: fails on the clean copy.
+    std::fs::write(d.join("poc.sh"), "true\n").unwrap();
+    std::fs::write(d.join(".e/findings/B.json"), rec("B", "bash poc.sh").to_string()).unwrap();
+    let mut c = e_cmd(&env, &["verify", "A"]);
+    c.env_remove("VENICE_API_KEY");
+    let o = run(c).await;
+    assert_eq!(o.code, Some(0), "verify needs no key: {}", o.stderr);
+    assert!(o.stdout.starts_with("A: proven -> proven (exit 0"), "{}", o.stdout);
+    let o = run(e_cmd(&env, &["verify"])).await;
+    assert_eq!(o.code, Some(4), "{}", o.stdout);
+    assert!(
+        o.stdout.contains("B: proven -> suspected (exit 127") && o.stdout.contains("no PoC files were kept")
+    );
+    let o = run(e_cmd(&env, &["verify", "C"])).await;
+    assert_eq!((o.code, o.stderr.as_str()), (Some(1), "e: no finding C in .e/findings\n"));
+
+    let m = mock(vec![
+        tool_reply(
+            &[("c1", "verdict", json!({"verdict": "confirmed", "reasoning": "Checked."}))],
+            usage(10, 5),
+        ),
+        text_reply("Confirmed.", usage(20, 5)),
+    ])
+    .await;
+    std::fs::write(&env.cfg, format!("base_url = \"{}\"\n", m.url)).unwrap();
+    let o = run(e_cmd(&env, &["triage", "A"])).await;
+    assert_eq!(o.code, Some(0), "{}", o.stderr);
+    assert!(o.stdout.contains("A: confirmed — Checked.\n"), "{}", o.stdout);
+    let a: Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join(".e/findings/A.json")).unwrap()).unwrap();
+    assert_eq!(a["triage"]["verdict"], "confirmed");
+
+    let o = run(e_cmd(&env, &["report"])).await;
+    assert!(o.stdout.contains("| [A](#finding-a) | high | proven | confirmed |"), "{}", o.stdout);
+    assert!(o.stdout.contains("**Triage:** confirmed"), "{}", o.stdout);
+    assert!(o.stdout.contains("Verified on a clean copy: exit code 127"), "{}", o.stdout);
 }
 
 #[tokio::test]

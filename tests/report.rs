@@ -85,7 +85,7 @@ fn markdown_is_sanitized_and_escaped() {
     assert!(!md.contains('\u{1b}') && !md.contains('\u{7}'), "{md}");
     assert!(md.contains("2 findings: 1 proven, 1 suspected. By severity: 1 critical, 1 low."), "{md}");
     assert!(
-        md.contains("| [F-001](#finding-f-001) | critical | proven | Drain \\| via reentry | `src/V.sol`, `f`, lines 2-3 |"),
+        md.contains("| [F-001](#finding-f-001) | critical | proven | - | Drain \\| via reentry | `src/V.sol`, `f`, lines 2-3 |"),
         "{md}"
     );
     assert!(md.contains("## F-001: Drain | via reentry\n"), "{md}");

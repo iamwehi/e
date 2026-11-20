@@ -26,14 +26,33 @@ cd path/to/target && e
 e -p "Audit src/Vault.sol"            # headless: prints the final message
 e -p "Audit src/Vault.sol" --json     # headless: transcript events as JSON lines
 e -p "/reentrancy Audit src/Vault.sol" # start a skill, then the task
+e -p "Audit src/" --rounds 5 --max-cost 10  # up to 5 sessions, at most $10
+e verify                              # re-run every PoC on a clean copy
+e triage --model deepseek-v4-pro      # a skeptical second opinion on each finding
 e report > REPORT.md                  # the findings as Markdown
 ```
 
+`--rounds N` keeps a headless audit going past one context window. When a
+session runs out of room (the context budget is exhausted, or the model
+stopped after the harness's 85% warning told it to write `.e/NOTES.md`), `e`
+starts a new session that reads `NOTES.md` and continues, up to N sessions.
+A session that finishes on its own ends the loop. stdout gets the last
+session's final message; each session has its own run directory.
+
+`--max-cost USD` (or `max_cost_usd` in the config) caps the spend of one `e`
+process, across all its sessions, rounds and triage reviews. At 85% the model
+is told to wrap up; once the cost reaches the cap, pending tool calls are not
+run and `e` exits 3. It needs prices for the model, since otherwise the cost
+is unknown: a model without prices fails with an error when a cap is set.
+
 `e report` reads `.e/findings/` and prints one Markdown document: a summary,
-a table, then each finding with its PoC command, result and the last 40 lines
-of its output. Proven findings come first, then by severity. Findings in the
-same file and bug class with overlapping lines are marked as possible
-duplicates of each other. It needs no config or key and starts no run.
+a table, then each finding with its PoC command, result, verification and
+triage verdict, and the last 40 lines of its latest PoC output. Proven
+findings come first, then by severity. Findings in the same file and bug
+class with overlapping lines are marked as possible duplicates of each other.
+It needs no config or key and starts no run.
+
+`e verify` and `e triage` are described under [Proofs of concept](#proofs-of-concept).
 
 At the prompt: `/model <id>`, `/new`, `/skills`, `/<skill> [task]` (Tab completes names).
 Ctrl-X Ctrl-E opens the prompt in `$VISUAL` (else `$EDITOR`, else `vi`); when
@@ -42,8 +61,8 @@ quitting with an error (vim's `:cq`) leaves the prompt as it was. Ctrl-C
 cancels a run, Ctrl-D exits.
 `--verbose` shows reasoning and full tool output.
 
-Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
-143 SIGTERM.
+Exit codes: 0 done, 1 error, 2 context budget exhausted, 3 cost limit
+reached, 4 (`e verify`) a PoC failed, 130 interrupted, 143 SIGTERM.
 
 ## Files (under `.e/` in the working directory)
 
@@ -53,7 +72,59 @@ Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
 | `NOTES.md` | the agent | Memory between runs. The harness never parses it. |
 | `skills/<name>/` | you | Project [skills](#skills). |
 | `runs/<timestamp>/` | harness | `transcript.jsonl`, plus `bash/` and `poc/` output logs. One per session. |
-| `findings/<id>.json` | `finding` tool | Status is `proven` only if `poc_cmd` exited 0 when the harness ran it. `e report` renders them. |
+| `findings/<id>.json` | `finding` tool | Status is `proven` only if `poc_cmd` exited 0 when the harness ran it, with no tracked file changed. `e verify` and `e triage` add to it; `e report` renders them. |
+| `findings/<id>.poc/` | `finding` tool | Copies of the new files (untracked, not ignored) present when the PoC ran. |
+| `verify/<timestamp>/` | `e verify` | A log per PoC run. The clean copies are deleted after each run. |
+
+## Proofs of concept
+
+A finding's status is set by the harness, never by the model, and only to
+`proven` when the harness itself ran `poc_cmd` and it exited 0. Three things
+make that status worth more than an exit code:
+
+**The code under audit must be unmodified.** In a git repository, `finding`
+lists the tracked files that differ from `HEAD` (staged or not) before and
+after the PoC runs. If any differ, the finding is `suspected` however the PoC
+exited, and the model is told which files to restore. A PoC that passes
+because the model planted the bug proves nothing. PoCs go in new files. If a
+PoC must change an existing file, such as a test helper, list it in
+`allow_modified` (a path, or a directory ending in `/`). Outside a git
+repository nothing can be checked, and the finding says so.
+
+**The PoC is kept.** The new files present when the PoC runs (untracked and
+not git-ignored, so not `node_modules` or build output) are copied to
+`.e/findings/<id>.poc/`: regular files only, at most 1 MB each and 8 MB or
+500 files in all. Anyone can read exactly what was run.
+
+**`e verify [ID...]` re-runs it on a clean copy.** For each finding with a
+`poc_cmd` (all, or the IDs given), `e verify` copies the repository with
+`tar` (leaving out `.e/`), resets tracked files to `HEAD`, deletes untracked
+files but keeps ignored ones (installed dependencies, build caches), resets
+submodules, adds back the finding's kept PoC files, and runs `poc_cmd` there.
+The status becomes `proven` or `suspected` from that run, and the result is
+stored under `verification`. This catches PoCs that depended on leftover
+state, on files the finding didn't keep, or on modified code. An absolute
+path to the working directory in `poc_cmd` is rewritten to the copy. It needs
+no API key. Outside a git repository, or when `.git` is not a directory (a
+worktree or submodule, whose shared git directory a reset would change),
+PoCs run in place or not at all. Exit code 0 if every PoC passed, 4 if any
+failed.
+
+**`e triage [ID...]` asks for a second opinion.** False positives are the
+main cost of an LLM audit. `e triage` starts a fresh session per finding with
+its own system prompt: a skeptical reviewer who tries to refute the finding,
+checks the code path, the PoC and the trust assumptions in `AUDIT.md`, and
+ends with the `verdict` tool (`confirmed`, `refuted` or `uncertain`, a
+reason, and optionally a different severity). It has `read`, `bash`, `edit`
+and `write` but not `finding`, and it sees the finding's record (not the
+auditor's transcript) and where its PoC files are. The verdict is stored
+under `triage`; the status is left alone. A different, stronger model is a
+good choice: `e triage --model deepseek-v4-pro`. `--max-cost` covers all the
+reviews together.
+
+The git commands `e` runs disable `core.fsmonitor` and hooks, which a
+malicious repository could use to run commands, and get the same scrubbed
+environment as the agent's commands.
 
 ## Skills
 
@@ -99,6 +170,8 @@ model = "deepseek-v4-1-flash"
 api_key_env = "VENICE_API_KEY"
 # api_key = "..."            # fallback when $VENICE_API_KEY is unset
 scrub_env = ["VENICE_API_KEY", "DEEPSEEK_API_KEY"]  # removed from commands, as is api_key_env
+# max_cost_usd = 10.0        # unset: no spending cap
+allow_modified = []          # tracked paths a PoC may change, e.g. ["test/", "foundry.toml"]
 prompt_cache_key = true
 prompt_cache_retention = "extended"
 prompt_cache_retention_models = ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"]

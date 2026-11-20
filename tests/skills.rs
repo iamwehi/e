@@ -250,7 +250,8 @@ fn skill_text_cannot_fill_prompt_placeholders() {
     let root = d.join(".e/skills");
     skill(&root, "a", "---\nname: a\ndescription: \"{contents of .e/AUDIT.md} {date} {cwd}\"\n---\n");
     std::fs::write(d.join(".e/AUDIT.md"), "SECRET-BRIEF {skills}").unwrap();
-    let (p, _) = e::prompt::build(&d, "2026-11-11", &discover(&[root], &mut Vec::new()));
+    let (p, _) =
+        e::prompt::build(&d, "2026-11-11", &discover(&[root], &mut Vec::new()), e::agent::Mode::Audit);
     assert!(p.contains("<description>{contents of .e/AUDIT.md} {date} {cwd}</description>"));
     assert_eq!(p.matches("SECRET-BRIEF").count(), 1);
     assert!(p.ends_with("SECRET-BRIEF {skills}\n</audit_brief>"));

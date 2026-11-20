@@ -55,6 +55,11 @@ impl Finding {
         }
     }
 
+    /// The `e triage` verdict, if any.
+    pub fn triage_verdict(&self) -> String {
+        self.record["triage"]["verdict"].as_str().map(sanitize).unwrap_or_default()
+    }
+
     fn severity_rank(&self) -> usize {
         SEVERITIES.iter().position(|s| *s == self.severity).unwrap_or(SEVERITIES.len())
     }
@@ -192,7 +197,12 @@ pub fn render(findings: &[Finding]) -> String {
     if !by_sev.is_empty() {
         out += &format!(" By severity: {}.", by_sev.join(", "));
     }
-    out += " Proven means the harness ran the proof of concept and it exited 0.\n\n";
+    out += " Proven means the harness ran the proof of concept and it exited 0 with the code under audit unmodified.";
+    let refuted = count(&|f| f.triage_verdict() == "refuted");
+    if refuted > 0 {
+        out += &format!(" {refuted} refuted in triage.");
+    }
+    out += "\n\n";
 
     let dups: Vec<Vec<&str>> = findings
         .iter()
@@ -205,12 +215,14 @@ pub fn render(findings: &[Finding]) -> String {
         })
         .collect();
 
-    out += "| ID | Severity | Status | Title | Location |\n| --- | --- | --- | --- | --- |\n";
+    out += "| ID | Severity | Status | Triage | Title | Location |\n| --- | --- | --- | --- | --- | --- |\n";
     for f in findings {
+        let triage = f.triage_verdict();
         out += &format!(
-            "| [{id}](#{anchor}) | {} | {} | {} | {} |\n",
+            "| [{id}](#{anchor}) | {} | {} | {} | {} | {} |\n",
             cell(&f.severity),
             cell(&f.status),
+            cell(if triage.is_empty() { "-" } else { &triage }),
             cell(&f.title),
             cell(&location(f)),
             id = cell(&f.id),
@@ -224,6 +236,10 @@ pub fn render(findings: &[Finding]) -> String {
         let mut meta = vec![format!("**Severity:** {}", f.severity), format!("**Status:** {}", f.status)];
         if !f.class.is_empty() {
             meta.push(format!("**Class:** {}", f.class));
+        }
+        let triage = f.triage_verdict();
+        if !triage.is_empty() {
+            meta.push(format!("**Triage:** {triage}"));
         }
         out += &meta.join(" · ");
         out += "\n";
@@ -252,8 +268,48 @@ pub fn render(findings: &[Finding]) -> String {
         if !fix.is_empty() {
             out += &format!("\n### Suggested fix\n\n{fix}\n");
         }
+        if !triage.is_empty() {
+            let t = &f.record["triage"];
+            let model = t["model"].as_str().map(sanitize).unwrap_or_default();
+            out += &format!("\n### Triage review\n\nVerdict: **{triage}**");
+            if let Some(sev) = t["severity"].as_str().filter(|s| *s != f.severity) {
+                out += &format!(", suggested severity {}", sanitize(sev));
+            }
+            if !model.is_empty() {
+                out += &format!(" (reviewer model {})", code(&model));
+            }
+            out += ".\n";
+            let reasoning = sanitize(t["reasoning"].as_str().unwrap_or("")).trim().to_string();
+            if !reasoning.is_empty() {
+                out += &format!("\n{reasoning}\n");
+            }
+        }
     }
     out
+}
+
+/// "exit code 0 after 1.2s" for a `poc` or `verification` record.
+fn run_result(r: &Value) -> String {
+    let secs = r["duration_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
+    let result = if r["timed_out"] == true {
+        "timed out".to_string()
+    } else if r["interrupted"] == true {
+        "interrupted".to_string()
+    } else {
+        match r["exit_code"].as_i64() {
+            Some(c) => format!("exit code {c}"),
+            None => "no exit code".to_string(),
+        }
+    };
+    let mut s = format!("{result} after {secs:.1}s");
+    if let Some(log) = r["log"].as_str() {
+        s += &format!(" (full log: {})", code(&sanitize(log)));
+    }
+    s
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(sanitize)).collect()).unwrap_or_default()
 }
 
 fn poc_section(f: &Finding) -> String {
@@ -263,26 +319,36 @@ fn poc_section(f: &Finding) -> String {
     }
     let mut s = format!("Command: {}\n", code(&cmd));
     let poc = &f.record["poc"];
-    if !poc.is_object() {
-        return s + "\nThe harness could not run it.\n";
+    match poc.is_object() {
+        true => s += &format!("\nResult: {}\n", run_result(poc)),
+        false => s += "\nThe harness did not run it when the finding was recorded.\n",
     }
-    let secs = poc["duration_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
-    let result = if poc["timed_out"] == true {
-        "timed out".to_string()
-    } else if poc["interrupted"] == true {
-        "interrupted".to_string()
-    } else {
-        match poc["exit_code"].as_i64() {
-            Some(c) => format!("exit code {c}"),
-            None => "no exit code".to_string(),
+    let tree = &f.record["tree"];
+    let bad = strings(&tree["disallowed"]);
+    if !bad.is_empty() {
+        let files: Vec<String> = bad.iter().map(|p| code(p)).collect();
+        s += &format!(
+            "\nNot proven: these tracked files differed from git HEAD when it ran: {}.\n",
+            files.join(", ")
+        );
+    } else if tree["git"] == false {
+        s +=
+            "\nNot a git repository: the harness could not check that the code under audit was unmodified.\n";
+    }
+    let v = &f.record["verification"];
+    if v.is_object() {
+        let how = match v["clean_copy"] == true {
+            true => "Verified on a clean copy",
+            false => "Re-run in place",
+        };
+        s += &format!("\n{how}: {}.\n", run_result(v));
+        for n in strings(&v["notes"]) {
+            s += &format!("\n- {n}\n");
         }
-    };
-    s += &format!("\nResult: {result} after {secs:.1}s");
-    if let Some(log) = poc["log"].as_str() {
-        s += &format!(" (full log: {})", code(&sanitize(log)));
     }
-    s += "\n";
-    let tail = sanitize(poc["output_tail"].as_str().unwrap_or(""));
+    // The output of the latest run: the verification if there was one.
+    let latest = if v.is_object() { v } else { poc };
+    let tail = sanitize(latest["output_tail"].as_str().unwrap_or(""));
     let lines: Vec<&str> = tail.lines().collect();
     if !lines.is_empty() {
         let shown = &lines[lines.len().saturating_sub(POC_LINES)..];

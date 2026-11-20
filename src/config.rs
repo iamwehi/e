@@ -41,6 +41,14 @@ pub struct Config {
     /// and PoCs), on top of `api_key_env`, which is always removed: the code
     /// under audit runs there and must not see API keys.
     pub scrub_env: Vec<String>,
+    /// Spending cap in USD for one `e` process, across sessions and rounds.
+    /// The run stops once the cost reaches it. Needs prices for the model.
+    pub max_cost_usd: Option<f64>,
+    /// Paths (relative to the working directory) that may differ from git
+    /// HEAD when a PoC runs, such as an existing test file the PoC extends.
+    /// A directory entry ends with `/`. Any other modified tracked file keeps
+    /// a finding from being proven.
+    pub allow_modified: Vec<String>,
     /// Extra top-level request fields, merged into every request body.
     pub extra_body: Map<String, Value>,
     /// Send a per-session `prompt_cache_key` so requests reach a warm cache.
@@ -96,6 +104,8 @@ impl Default for Config {
             api_key_env: "VENICE_API_KEY".into(),
             api_key: None,
             scrub_env: ["VENICE_API_KEY", "DEEPSEEK_API_KEY"].map(String::from).to_vec(),
+            max_cost_usd: None,
+            allow_modified: Vec::new(),
             extra_body,
             prompt_cache_key: true,
             // Venice forwards "extended" (24 h) to OpenAI and other models ignore
@@ -152,6 +162,11 @@ impl Config {
     pub fn from_toml(text: &str) -> Result<Config, String> {
         let cfg: Config = toml::from_str(text).map_err(|e| e.to_string().trim_end().to_string())?;
         crate::editor::parse_keys(&cfg.editor_key).map_err(|e| format!("editor_key: {e}"))?;
+        if let Some(c) = cfg.max_cost_usd
+            && !(c.is_finite() && c > 0.0)
+        {
+            return Err(format!("max_cost_usd must be a positive number, got {c}"));
+        }
         Ok(cfg)
     }
 

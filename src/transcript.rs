@@ -15,17 +15,7 @@ pub struct Transcript {
 
 impl Transcript {
     pub fn create(cwd: &Path, echo: bool) -> std::io::Result<Self> {
-        let t = civil(now_unix());
-        let stamp =
-            format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", t.year, t.month, t.day, t.hour, t.minute, t.second);
-        let base = cwd.join(".e").join("runs");
-        let mut dir = base.join(&stamp);
-        let mut n = 1;
-        while dir.exists() {
-            dir = base.join(format!("{stamp}-{n}"));
-            n += 1;
-        }
-        std::fs::create_dir_all(&dir)?;
+        let dir = unique_dir(&cwd.join(".e").join("runs"))?;
         let file = File::options().create(true).append(true).open(dir.join("transcript.jsonl"))?;
         Ok(Transcript { file: Some(file), echo, dir })
     }
@@ -52,6 +42,21 @@ impl Transcript {
             let _ = out.flush();
         }
     }
+}
+
+/// Create and return a new directory `<base>/<UTC timestamp>[-n]`.
+pub fn unique_dir(base: &Path) -> std::io::Result<PathBuf> {
+    let t = civil(now_unix());
+    let stamp =
+        format!("{:04}{:02}{:02}T{:02}{:02}{:02}Z", t.year, t.month, t.day, t.hour, t.minute, t.second);
+    let mut dir = base.join(&stamp);
+    let mut n = 1;
+    while dir.exists() {
+        dir = base.join(format!("{stamp}-{n}"));
+        n += 1;
+    }
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
 pub fn now_unix() -> u64 {
