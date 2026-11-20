@@ -36,6 +36,8 @@ pub enum RunEnd {
     Done(String),
     Interrupted,
     Budget(String),
+    /// `max_cost_usd` reached.
+    CostLimit(String),
     Error(String),
 }
 
@@ -45,12 +47,22 @@ impl RunEnd {
             RunEnd::Done(_) => 0,
             RunEnd::Error(_) => 1,
             RunEnd::Budget(_) => 2,
+            RunEnd::CostLimit(_) => 3,
             RunEnd::Interrupted => 130,
         }
     }
 }
 
 pub const WARN_PERCENT: u64 = 85;
+
+/// What a session is for: it picks the system prompt and the tools.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    /// Find and prove vulnerabilities (the default).
+    Audit,
+    /// Try to refute one recorded finding (`e triage`).
+    Triage,
+}
 
 pub struct Session {
     pub cfg: Config,
@@ -68,25 +80,41 @@ pub struct Session {
     activated: HashSet<String>,
     /// Context size after the latest response (prompt + completion tokens).
     pub context_tokens: u64,
+    /// The latest run was told it is near its context or cost budget, so a
+    /// final reply means "out of room", not "finished".
+    pub budget_warned: bool,
+    pub mode: Mode,
     client: Client,
     tools: Value,
+    tool_names: Vec<String>,
     seq: u32,
 }
 
 impl Session {
     pub fn new(cfg: Config, model: String, cwd: PathBuf, echo_json: bool) -> Result<Self, String> {
+        Self::with_mode(cfg, model, cwd, echo_json, Mode::Audit)
+    }
+
+    pub fn with_mode(
+        cfg: Config,
+        model: String,
+        cwd: PathBuf,
+        echo_json: bool,
+        mode: Mode,
+    ) -> Result<Self, String> {
         let key = cfg.api_key().ok_or_else(|| format!("{} is not set", cfg.api_key_env))?;
         let client = Client::new(&cfg.base_url, key)?;
         let mut warnings = Vec::new();
         let skills = skills::discover(&skills::roots(&cwd), &mut warnings);
-        let (system, prompt_warnings) = prompt::build(&cwd, &crate::transcript::today(), &skills);
+        let (system, prompt_warnings) = prompt::build(&cwd, &crate::transcript::today(), &skills, mode);
         warnings.extend(prompt_warnings);
-        let tools = tools::schemas();
+        let tools = tools::schemas(mode);
+        let tool_names = tools::names(&tools);
         let mut transcript =
             Transcript::create(&cwd, echo_json).map_err(|e| format!("cannot create .e/runs: {e}"))?;
         transcript.log(
             "session",
-            json!({"model": model, "cwd": cwd, "base_url": cfg.base_url, "system": system,
+            json!({"model": model, "cwd": cwd, "base_url": cfg.base_url, "mode": format!("{mode:?}").to_lowercase(), "system": system,
                    "tools": tools, "warnings": warnings}),
         );
         Ok(Session {
@@ -101,8 +129,11 @@ impl Session {
             skills,
             activated: HashSet::new(),
             context_tokens: 0,
+            budget_warned: false,
+            mode,
             client,
             tools,
+            tool_names,
             seq: 0,
         })
     }
@@ -170,10 +201,22 @@ impl Session {
     pub async fn run(&mut self, task: &str, cancel: &Cancel, ev: &mut dyn FnMut(Event)) -> RunEnd {
         self.push_user(task.to_string(), "user");
         let budget = self.cfg.context_budget.max(1);
-        let mut warned = false;
+        let max_cost = self.cfg.max_cost_usd;
+        self.budget_warned = false;
         let end = loop {
             if cancel.is_cancelled() {
                 break RunEnd::Interrupted;
+            }
+            if let Some(max) = max_cost {
+                if !self.cfg.prices.contains_key(&self.model) {
+                    break RunEnd::Error(format!(
+                        "max_cost_usd is set but model {} has no prices, so its cost is unknown",
+                        self.model
+                    ));
+                }
+                if self.meter.cost >= max {
+                    break RunEnd::CostLimit(cost_message(self.meter.cost, max));
+                }
             }
             let body = self.body();
             self.transcript.log("request", json!({"model": self.model, "messages": self.history.len() + 1}));
@@ -239,10 +282,13 @@ impl Session {
                     other => RunEnd::Error(format!("the reply stopped with finish_reason {other:?}")),
                 };
             }
+            let over_cost = max_cost.is_some_and(|m| self.meter.cost >= m);
             let exhausted = self.context_tokens >= budget;
             for call in &calls {
                 self.seq += 1;
-                let skip = if exhausted {
+                let skip = if over_cost {
+                    Some("Not executed: the cost limit is reached.")
+                } else if exhausted {
                     Some("Not executed: the context budget is exhausted.")
                 } else if finish == "length" {
                     Some(
@@ -271,7 +317,10 @@ impl Session {
                             cancel,
                             seq: self.seq,
                         };
-                        let out = tools::dispatch(name, arguments, &ctx).await;
+                        let out = match self.tool_names.iter().any(|n| n == name) {
+                            true => tools::dispatch(name, arguments, &ctx).await,
+                            false => tools::Output::err(format!("unknown tool: {name}")),
+                        };
                         ev(Event::ToolEnd {
                             summary: &out.summary,
                             content: &out.content,
@@ -288,6 +337,9 @@ impl Session {
                 );
                 self.history.push(Message::Tool { tool_call_id: call.id.clone(), content: out.content });
             }
+            if over_cost {
+                break RunEnd::CostLimit(cost_message(self.meter.cost, max_cost.unwrap_or_default()));
+            }
             if exhausted {
                 break RunEnd::Budget(format!(
                     "context budget exhausted: {} of {budget} tokens",
@@ -297,12 +349,26 @@ impl Session {
             if cancel.is_cancelled() {
                 break RunEnd::Interrupted;
             }
-            if !warned && self.context_tokens * 100 >= budget * WARN_PERCENT {
-                warned = true;
-                let msg = format!(
-                    "[harness] {} of {budget} context tokens used. Update .e/NOTES.md now: what you covered, which hypotheses you ruled out and why, and what is left. Then stop and reply with your summary.",
-                    self.context_tokens
-                );
+            let near_context = self.context_tokens * 100 >= budget * WARN_PERCENT;
+            let near_cost = max_cost.is_some_and(|m| self.meter.cost * 100.0 >= m * WARN_PERCENT as f64);
+            if !self.budget_warned && (near_context || near_cost) {
+                self.budget_warned = true;
+                let used = match near_context {
+                    true => format!("{} of {budget} context tokens used", self.context_tokens),
+                    false => format!(
+                        "${:.4} of the ${:.2} cost limit spent",
+                        self.meter.cost,
+                        max_cost.unwrap_or_default()
+                    ),
+                };
+                let msg = match self.mode {
+                    Mode::Audit => format!(
+                        "[harness] {used}. Update .e/NOTES.md now: what you covered, which hypotheses you ruled out and why, and what is left. Then stop and reply with your summary."
+                    ),
+                    Mode::Triage => format!(
+                        "[harness] {used}. Give your verdict with the verdict tool now, from what you have established."
+                    ),
+                };
                 ev(Event::Notice(&msg));
                 self.push_user(msg, "budget_warning");
             }
@@ -316,11 +382,16 @@ impl Session {
     }
 }
 
+fn cost_message(cost: f64, max: f64) -> String {
+    format!("cost limit reached: ${cost:.4} of ${max:.2}")
+}
+
 fn end_json(end: &RunEnd) -> Value {
     match end {
         RunEnd::Done(t) => json!({"status": "done", "message": t}),
         RunEnd::Interrupted => json!({"status": "interrupted"}),
         RunEnd::Budget(m) => json!({"status": "budget_exhausted", "error": m}),
+        RunEnd::CostLimit(m) => json!({"status": "cost_limit", "error": m}),
         RunEnd::Error(m) => json!({"status": "error", "error": m}),
     }
 }

@@ -317,7 +317,7 @@ fn skills_frontmatter_and_prompt() {
     std::fs::write(root.join("broken/SKILL.md"), "no frontmatter").unwrap();
     let mut warnings = Vec::new();
     let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
-    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills, e::agent::Mode::Audit);
     warnings.extend(more);
     assert!(p.contains(&format!(
         "<skill>\n<name>reentrancy</name>\n<description>Checks for reentrancy</description>\n\
@@ -331,13 +331,13 @@ fn skills_frontmatter_and_prompt() {
     std::fs::write(d.join(".e/AUDIT.md"), "Scope: src/\n").unwrap();
     let mut warnings = Vec::new();
     let skills = e::skills::discover(std::slice::from_ref(&root), &mut warnings);
-    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills);
+    let (p, more) = e::prompt::build(&d, "2026-11-11", &skills, e::agent::Mode::Audit);
     warnings.extend(more);
     assert!(p.ends_with("</available_skills>\n\n<audit_brief>\nScope: src/\n</audit_brief>"));
     assert!(!warnings.iter().any(|w| w.contains("AUDIT.md")));
 
     // No skills: no catalog and no instructions about skills.
-    let (p, _) = e::prompt::build(&d, "2026-11-11", &[]);
+    let (p, _) = e::prompt::build(&d, "2026-11-11", &[], e::agent::Mode::Audit);
     assert!(!p.contains("available_skills") && !p.contains("SKILL.md"));
     assert!(p.contains("Date: 2026-11-11\n\n<audit_brief>"));
 }

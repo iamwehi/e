@@ -1,7 +1,9 @@
-//! The five tools: read, bash, edit, write, finding.
+//! The tools: read, bash, edit, write, and finding (audit) or verdict (triage).
 
+use crate::agent::Mode;
 use crate::config::Config;
 use crate::exec::{self, Cancel};
+use crate::tree;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -12,6 +14,7 @@ use std::time::Duration;
 pub const MAX_LINES: usize = 2000;
 pub const MAX_BYTES: usize = 50 * 1024;
 const SEVERITIES: [&str; 5] = ["critical", "high", "medium", "low", "info"];
+pub const VERDICTS: [&str; 3] = ["confirmed", "refuted", "uncertain"];
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"type": "function", "function": {
@@ -21,8 +24,29 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     }})
 }
 
-pub fn schemas() -> Value {
+/// The names of the tools in `schemas`.
+pub fn names(schemas: &Value) -> Vec<String> {
+    let list = schemas.as_array().map(Vec::as_slice).unwrap_or_default();
+    list.iter().filter_map(|t| t["function"]["name"].as_str().map(String::from)).collect()
+}
+
+pub fn schemas(mode: Mode) -> Value {
     let s = |d: &str| json!({"type": "string", "description": d});
+    let last = match mode {
+        Mode::Audit => finding_schema(),
+        Mode::Triage => tool(
+            "verdict",
+            "Record your conclusion about the finding under review. Call it once, when you are done.",
+            json!({
+                "verdict": {"type": "string", "enum": VERDICTS,
+                            "description": "confirmed: checked and it holds; refuted: something prevents it; uncertain: not settled"},
+                "reasoning": s("What you checked and why you concluded this; for refuted, exactly what prevents the attack"),
+                "severity": {"type": "string", "enum": SEVERITIES,
+                             "description": "Optional: the severity you think is right, if it differs"},
+            }),
+            &["verdict", "reasoning"],
+        ),
+    };
     json!([
         tool(
             "read",
@@ -55,36 +79,31 @@ pub fn schemas() -> Value {
             json!({"path": s("File path"), "content": s("Full file content")}),
             &["path", "content"]
         ),
-        tool(
-            "finding",
-            "Record a vulnerability in .e/findings/<id>.json. If poc_cmd is given, the harness runs it in the working directory and sets status `proven` if it exits 0, `suspected` otherwise; without poc_cmd the status is `suspected`. Reusing an id overwrites that finding.",
-            json!({
-                "id": s("Optional stable id, letters, digits, '-', '_' or '.'; generated if omitted"),
-                "title": s("One-line title"),
-                "severity": {"type": "string", "enum": SEVERITIES},
-                "class": s("Bug class, e.g. reentrancy, access-control, rounding"),
-                "file": s("File containing the bug"),
-                "function": s("Function containing the bug"),
-                "lines": s("Line range, e.g. 120-145"),
-                "description": s("What is wrong, with reference to the code"),
-                "attack_path": s("Step-by-step: who calls what, with which inputs"),
-                "impact": s("What the attacker gains or breaks"),
-                "poc_cmd": s("Command that runs the proof of concept; must exit 0 only if the attack succeeds"),
-                "fix": s("Suggested fix"),
-            }),
-            &[
-                "title",
-                "severity",
-                "class",
-                "file",
-                "function",
-                "lines",
-                "description",
-                "attack_path",
-                "impact"
-            ]
-        ),
+        last,
     ])
+}
+
+fn finding_schema() -> Value {
+    let s = |d: &str| json!({"type": "string", "description": d});
+    tool(
+        "finding",
+        "Record a vulnerability in .e/findings/<id>.json. If poc_cmd is given, the harness runs it in the working directory and sets status `proven` if it exits 0 and (in a git repository) no tracked file differs from HEAD; otherwise `suspected`. Without poc_cmd the status is `suspected`. New files are copied with the finding so the PoC can be re-run on a clean copy. Reusing an id overwrites that finding.",
+        json!({
+            "id": s("Optional stable id, letters, digits, '-', '_' or '.'; generated if omitted"),
+            "title": s("One-line title"),
+            "severity": {"type": "string", "enum": SEVERITIES},
+            "class": s("Bug class, e.g. reentrancy, access-control, rounding"),
+            "file": s("File containing the bug"),
+            "function": s("Function containing the bug"),
+            "lines": s("Line range, e.g. 120-145"),
+            "description": s("What is wrong, with reference to the code"),
+            "attack_path": s("Step-by-step: who calls what, with which inputs"),
+            "impact": s("What the attacker gains or breaks"),
+            "poc_cmd": s("Command that runs the proof of concept; must exit 0 only if the attack succeeds"),
+            "fix": s("Suggested fix"),
+        }),
+        &["title", "severity", "class", "file", "function", "lines", "description", "attack_path", "impact"],
+    )
 }
 
 pub struct Ctx<'a> {
@@ -148,6 +167,12 @@ pub async fn dispatch(name: &str, args: &str, ctx: &Ctx<'_>) -> Output {
                 sync(write(ctx.cwd, &a.path, &a.content))
             }
             "finding" => finding(ctx, parse(name, v)?).await,
+            "verdict" => {
+                let a: VerdictArgs = parse(name, v)?;
+                sync(
+                    a.check().map(|v| format!("Recorded verdict: {v}. Reply with a short summary and stop.")),
+                )
+            }
             _ => Output::err(format!("unknown tool: {name}")),
         })
     };
@@ -325,6 +350,43 @@ pub struct FindingArgs {
     pub fix: Option<String>,
 }
 
+/// Arguments of the verdict tool (`e triage`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct VerdictArgs {
+    pub verdict: String,
+    pub reasoning: String,
+    pub severity: Option<String>,
+}
+
+impl VerdictArgs {
+    /// The verdict, lowercased, if it and the severity are valid.
+    pub fn check(&self) -> Result<String, String> {
+        let v = self.verdict.trim().to_lowercase();
+        if !VERDICTS.contains(&v.as_str()) {
+            return Err(format!("verdict must be one of {VERDICTS:?}, got {:?}", self.verdict));
+        }
+        if let Some(sev) = self.severity.as_deref().map(str::trim).filter(|s| !s.is_empty())
+            && !SEVERITIES.contains(&sev.to_lowercase().as_str())
+        {
+            return Err(format!("severity must be one of {SEVERITIES:?}, got {sev:?}"));
+        }
+        if self.reasoning.trim().is_empty() {
+            return Err("reasoning must not be empty".into());
+        }
+        Ok(v)
+    }
+}
+
+/// Write `.e/findings/<id>.json` atomically.
+pub fn save_finding(dir: &Path, id: &str, record: &Value) -> Result<(), String> {
+    let path = dir.join(format!("{id}.json"));
+    let tmp = dir.join(format!(".{id}.json.tmp"));
+    let text = serde_json::to_string_pretty(record).unwrap_or_default();
+    std::fs::write(&tmp, text + "\n")
+        .and_then(|_| std::fs::rename(&tmp, &path))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
 fn valid_id(id: &str) -> bool {
     !id.starts_with('.')
         && id.len() <= 64
@@ -349,7 +411,24 @@ async fn finding(ctx: &Ctx<'_>, a: FindingArgs) -> Output {
             .unwrap_or_default(),
     };
     let poc_cmd = a.poc_cmd.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let scrub = ctx.cfg.scrubbed_env();
+    let snapshot_dir = dir.join(format!("{id}.poc"));
     let mut note = String::new();
+    // The tree before the PoC runs: what the PoC was written against. New files are copied
+    // with the finding so `e verify` can re-run it on a clean copy.
+    let before = match poc_cmd {
+        Some(_) => tree::state(ctx.cwd, &scrub),
+        None => Ok(None),
+    };
+    let (mut poc_files, mut poc_skipped) = (Vec::new(), Vec::new());
+    if let Ok(Some(st)) = &before {
+        match tree::snapshot(ctx.cwd, &st.untracked, &snapshot_dir) {
+            Ok((c, s)) => (poc_files, poc_skipped) = (c, s),
+            Err(e) => note = format!("Could not copy the PoC files: {e}"),
+        }
+    } else if snapshot_dir.exists() {
+        let _ = std::fs::remove_dir_all(&snapshot_dir);
+    }
     let poc = match poc_cmd {
         None => {
             note = "No poc_cmd given, so the status is suspected.".into();
@@ -367,7 +446,46 @@ async fn finding(ctx: &Ctx<'_>, a: FindingArgs) -> Output {
             }
         }
     };
-    let status = if poc.as_ref().is_some_and(|x| x.success()) { "proven" } else { "suspected" };
+    let tree = match (&before, poc_cmd) {
+        (_, None) => Value::Null,
+        (Err(e), _) => json!({"git": true, "error": e}),
+        (Ok(None), _) => json!({"git": false}),
+        (Ok(Some(b)), _) => {
+            // The PoC run itself may change tracked files (generated code, say); count both.
+            let mut modified = b.modified.clone();
+            if let Ok(Some(after)) = tree::state(ctx.cwd, &scrub) {
+                for m in after.modified {
+                    if !modified.contains(&m) {
+                        modified.push(m);
+                    }
+                }
+            }
+            let bad = tree::disallowed(&modified, &ctx.cfg.allow_modified);
+            json!({"git": true, "modified": modified, "disallowed": bad})
+        }
+    };
+    let tainted: Vec<String> = match &tree["disallowed"] {
+        Value::Array(v) => v.iter().filter_map(|p| p.as_str().map(String::from)).collect(),
+        _ => Vec::new(),
+    };
+    let poc_ok = poc.as_ref().is_some_and(|x| x.success());
+    let status = if poc_ok && tainted.is_empty() { "proven" } else { "suspected" };
+    if poc_ok && !tainted.is_empty() {
+        note = format!(
+            "The PoC exited 0, but these tracked files differ from git HEAD: {}. A PoC against modified code proves nothing, so the status is suspected. Restore them (git checkout HEAD -- <file>), keep the PoC in new files, and record the finding again.",
+            tainted.join(", ")
+        );
+    } else if let Ok(None) = &before
+        && poc_ok
+    {
+        note = "Not a git repository: the harness could not check that the code under audit is unmodified, and `e verify` can only re-run this PoC in place.".into();
+    } else if let Err(e) = &before
+        && poc_ok
+    {
+        note = format!(
+            "The harness could not check the git tree ({e}), so it could not check that the code under audit is unmodified."
+        );
+    }
     let record = json!({
         "id": id,
         "title": a.title,
@@ -390,19 +508,21 @@ async fn finding(ctx: &Ctx<'_>, a: FindingArgs) -> Output {
             "output_tail": x.tail,
             "log": x.log_path,
         })),
+        "tree": tree,
+        "poc_files": poc_files,
+        "poc_files_skipped": poc_skipped,
         "updated_at": crate::transcript::now_unix(),
         "run_dir": ctx.run_dir,
     });
-    let path = dir.join(format!("{id}.json"));
-    let tmp = dir.join(format!(".{id}.json.tmp"));
-    let text = serde_json::to_string_pretty(&record).unwrap_or_default();
-    if let Err(e) = std::fs::write(&tmp, text + "\n").and_then(|_| std::fs::rename(&tmp, &path)) {
-        return Output::err(format!("cannot write {}: {e}", path.display()));
+    if let Err(e) = save_finding(&dir, &id, &record) {
+        return Output::err(e);
     }
     let mut content = format!("Recorded finding {id} in .e/findings/{id}.json. Status: {status}.");
-    match &poc {
-        Some(x) => content += &format!("\nPoC output:\n{}", x.model_text()),
-        None => content += &format!("\n{note}"),
+    if let Some(x) = &poc {
+        content += &format!("\nPoC output:\n{}", x.model_text());
+    }
+    if !note.is_empty() {
+        content += &format!("\n{note}");
     }
     Output::ok(content, &format!("{id} {status}"))
 }

@@ -13,15 +13,24 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
+const USAGE: &str = "usage: e [--model ID] [--verbose] [--max-cost USD] [-p TASK [--json] [--rounds N]]
        e report
+       e verify [ID...]
+       e triage [ID...] [--model ID] [--verbose] [--max-cost USD]
 
-  report       print the findings in .e/findings as Markdown
+  -p TASK         run one task headless and print the final message
+  --json          with -p: stream transcript events to stdout as JSON lines
+  --rounds N      with -p: when a session runs out of context, start a new
+                  one that continues from .e/NOTES.md, up to N sessions
+  --max-cost USD  stop once the cost reaches USD (max_cost_usd in the config)
+  --model ID      model to use (default from config)
+  -v, --verbose   show reasoning and full tool output
 
-  -p TASK      run one task headless and print the final message
-  --json       with -p: stream transcript events to stdout as JSON lines
-  --model ID   model to use (default from config)
-  -v, --verbose  show reasoning and full tool output
+  report   print the findings in .e/findings as Markdown
+  verify   re-run the PoCs of the findings (all, or the IDs given) on a
+           clean copy of the repository and update their status
+  triage   review each finding in a fresh session that tries to refute it,
+           and record its verdict
 
 Interactive commands: /model <id>, /new, /skills, /<skill> [task]. A TASK
 may also start with /<skill>. Ctrl-X Ctrl-E (editor_key in the config) opens
@@ -29,38 +38,72 @@ the prompt in $VISUAL or $EDITOR. Ctrl-C cancels a run, Ctrl-D exits.
 Provider: Venice by default (key in VENICE_API_KEY); any OpenAI-compatible
 API via config. Config: $E_CONFIG or ~/.config/e/config.toml.";
 
+#[derive(Default, PartialEq, Clone, Copy)]
+enum Cmd {
+    #[default]
+    Run,
+    Report,
+    Verify,
+    Triage,
+}
+
 #[derive(Default)]
 struct Args {
+    cmd: Cmd,
     task: Option<String>,
     json: bool,
     verbose: bool,
     model: Option<String>,
-    report: bool,
+    rounds: Option<u32>,
+    max_cost: Option<f64>,
+    /// Finding ids for verify and triage.
+    ids: Vec<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args::default();
     let mut it = std::env::args().skip(1).peekable();
-    if it.peek().map(String::as_str) == Some("report") {
+    a.cmd = match it.peek().map(String::as_str) {
+        Some("report") => Cmd::Report,
+        Some("verify") => Cmd::Verify,
+        Some("triage") => Cmd::Triage,
+        _ => Cmd::Run,
+    };
+    if a.cmd != Cmd::Run {
         it.next();
-        if let Some(arg) = it.next() {
-            return Err(format!("unknown argument: {arg}"));
-        }
-        a.report = true;
-        return Ok(a);
     }
+    let unknown = |arg: &str| Err(format!("unknown argument: {arg}"));
     while let Some(arg) = it.next() {
+        let (run, triage) = (a.cmd == Cmd::Run, a.cmd == Cmd::Triage);
         match arg.as_str() {
-            "-p" | "--print" => a.task = Some(it.next().ok_or("-p needs a task")?),
-            "--json" => a.json = true,
-            "-v" | "--verbose" => a.verbose = true,
-            "--model" | "-m" => a.model = Some(it.next().ok_or("--model needs an id")?),
             "-h" | "--help" => return Err(String::new()),
-            other => return Err(format!("unknown argument: {other}")),
+            "-p" | "--print" if run => a.task = Some(it.next().ok_or("-p needs a task")?),
+            "--json" if run => a.json = true,
+            "--rounds" if run => {
+                let n = it.next().ok_or("--rounds needs a number")?;
+                match n.parse::<u32>() {
+                    Ok(n) if n >= 1 => a.rounds = Some(n),
+                    _ => return Err(format!("--rounds needs a positive whole number, got {n}")),
+                }
+            }
+            "-v" | "--verbose" if run || triage => a.verbose = true,
+            "--model" | "-m" if run || triage => a.model = Some(it.next().ok_or("--model needs an id")?),
+            "--max-cost" if run || triage => {
+                let n = it.next().ok_or("--max-cost needs an amount in USD")?;
+                match n.trim_start_matches('$').parse::<f64>() {
+                    Ok(c) if c.is_finite() && c > 0.0 => a.max_cost = Some(c),
+                    _ => return Err(format!("--max-cost needs a positive amount in USD, got {n}")),
+                }
+            }
+            id if !id.starts_with('-') && matches!(a.cmd, Cmd::Verify | Cmd::Triage) => a.ids.push(id.into()),
+            other => return unknown(other),
         }
     }
     if a.json && a.task.is_none() {
         return Err("--json needs -p".into());
+    }
+    if a.rounds.is_some() && a.task.is_none() {
+        return Err("--rounds needs -p".into());
     }
     Ok(a)
 }
@@ -171,7 +214,7 @@ fn main() -> ExitCode {
             return ExitCode::from(if e.is_empty() { 0 } else { 2 });
         }
     };
-    if args.report {
+    if args.cmd == Cmd::Report {
         return report();
     }
     term::save_terminal();
@@ -226,7 +269,7 @@ async fn async_main(args: Args) -> u8 {
         eprintln!("e: cannot install signal handlers: {e}");
         return 1;
     }
-    let cfg = match Config::load() {
+    let mut cfg = match Config::load() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("e: config: {e}");
@@ -240,7 +283,15 @@ async fn async_main(args: Args) -> u8 {
             return 1;
         }
     };
+    if args.max_cost.is_some() {
+        cfg.max_cost_usd = args.max_cost;
+    }
     let model = args.model.clone().unwrap_or_else(|| cfg.model.clone());
+    match args.cmd {
+        Cmd::Verify => return verify(&cfg, &cwd, &args.ids).await,
+        Cmd::Triage => return triage(&cfg, &model, &cwd, &args.ids, args.verbose).await,
+        Cmd::Run | Cmd::Report => {}
+    }
     let session = match Session::new(cfg, model, cwd, args.json) {
         Ok(s) => s,
         Err(e) => {
@@ -249,12 +300,12 @@ async fn async_main(args: Args) -> u8 {
         }
     };
     match args.task {
-        Some(task) => headless(session, &task, args.json, args.verbose).await,
+        Some(task) => headless(session, &task, args.json, args.verbose, args.rounds.unwrap_or(1)).await,
         None => interactive(session, args.verbose).await,
     }
 }
 
-async fn headless(mut s: Session, task: &str, json: bool, verbose: bool) -> u8 {
+async fn headless(mut s: Session, task: &str, json: bool, verbose: bool, rounds: u32) -> u8 {
     let mut ui = Ui::new(true, verbose);
     ui.quiet = json;
     for w in &s.warnings {
@@ -273,15 +324,88 @@ async fn headless(mut s: Session, task: &str, json: bool, verbose: bool) -> u8 {
     let task = expanded.as_deref().unwrap_or(task);
     let cancel = Cancel::default();
     set_current(Some(cancel.clone()));
-    let end = s.run(task, &cancel, &mut |ev| ui.event(ev)).await;
+    let mut round = 1;
+    let mut message = task.to_string();
+    let end = loop {
+        let end = s.run(&message, &cancel, &mut |ev| ui.event(ev)).await;
+        // Out of room rather than finished: the context ran out, or the model stopped
+        // because the harness told it to wrap up.
+        let out_of_room =
+            matches!(end, RunEnd::Budget(_)) || (matches!(end, RunEnd::Done(_)) && s.budget_warned);
+        if round >= rounds || !out_of_room {
+            break end;
+        }
+        round += 1;
+        let (cfg, model, cwd, meter) = (s.cfg.clone(), s.model.clone(), s.cwd.clone(), s.meter);
+        s = match Session::new(cfg, model, cwd, json) {
+            Ok(n) => n,
+            Err(e) => break RunEnd::Error(e),
+        };
+        s.meter = meter;
+        if !json {
+            ui.notice(&format!(
+                "round {round}/{rounds}: new session, log {} · {} so far",
+                s.transcript.dir.display(),
+                s.meter.display()
+            ));
+        }
+        message = format!(
+            "[harness] Round {round} of {rounds}. An earlier session worked on this task until it ran out of context. Read .e/NOTES.md first: continue from where it stopped and don't redo work it covered.\n\nThe task:\n\n{task}"
+        );
+    };
     set_current(None);
     match &end {
         RunEnd::Done(text) if !json => println!("{}", term::sanitize(text).trim_end()),
         RunEnd::Done(_) => {}
         RunEnd::Interrupted => eprintln!("e: interrupted"),
-        RunEnd::Budget(m) | RunEnd::Error(m) => eprintln!("e: {}", term::sanitize(m)),
+        RunEnd::Budget(m) | RunEnd::CostLimit(m) | RunEnd::Error(m) => eprintln!("e: {}", term::sanitize(m)),
     }
     end.exit_code()
+}
+
+/// `e verify`: one line per finding on stdout. Exit 0 if every PoC that ran passed, 4 if any
+/// failed, 1 on errors.
+async fn verify(cfg: &Config, cwd: &std::path::Path, ids: &[String]) -> u8 {
+    let cancel = Cancel::default();
+    set_current(Some(cancel.clone()));
+    let r = e::verify::verify(cfg, cwd, ids, &cancel, &mut |line| println!("{}", term::sanitize(line))).await;
+    set_current(None);
+    match r {
+        _ if cancel.is_cancelled() => 130,
+        Ok(true) => 0,
+        Ok(false) => 4,
+        Err(e) => {
+            eprintln!("e: {}", term::sanitize(&e));
+            1
+        }
+    }
+}
+
+/// `e triage`: verdicts on stdout, the review sessions on stderr.
+async fn triage(cfg: &Config, model: &str, cwd: &std::path::Path, ids: &[String], verbose: bool) -> u8 {
+    let mut ui = Ui::new(true, verbose);
+    let cancel = Cancel::default();
+    set_current(Some(cancel.clone()));
+    let mut meter = e::config::Meter::default();
+    let r = e::verify::triage(
+        cfg,
+        model,
+        cwd,
+        ids,
+        &mut meter,
+        &cancel,
+        &mut |line| println!("{}", term::sanitize(line)),
+        &mut |ev| ui.event(ev),
+    )
+    .await;
+    set_current(None);
+    match r {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("e: {}", term::sanitize(&e));
+            1
+        }
+    }
 }
 
 async fn interactive(mut s: Session, verbose: bool) -> u8 {
@@ -388,7 +512,9 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
                     ("new", "") => {
                         let (cfg, model, cwd) = (s.cfg.clone(), s.model.clone(), s.cwd.clone());
                         match Session::new(cfg, model, cwd, false) {
-                            Ok(n) => {
+                            Ok(mut n) => {
+                                // The cost shown and max_cost_usd cover the whole process.
+                                n.meter = s.meter;
                                 s = n;
                                 if let Some(e) = editor.as_mut() {
                                     e.set_helper(Some(Commands::of(&s)));
@@ -431,7 +557,7 @@ async fn interactive(mut s: Session, verbose: bool) -> u8 {
         match end {
             RunEnd::Done(_) => {}
             RunEnd::Interrupted => ui.notice("interrupted"),
-            RunEnd::Budget(m) | RunEnd::Error(m) => ui.notice(&format!("error: {m}")),
+            RunEnd::Budget(m) | RunEnd::CostLimit(m) | RunEnd::Error(m) => ui.notice(&format!("error: {m}")),
         }
     }
 }

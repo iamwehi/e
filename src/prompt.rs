@@ -1,5 +1,6 @@
 //! The system prompt: fixed text, the skills catalog and the audit brief.
 
+use crate::agent::Mode;
 use crate::skills::{self, Skill};
 use std::path::Path;
 
@@ -44,8 +45,14 @@ How to work:
 - Report only what has security impact. Leave out style,
   gas and best-practice advice. A few proven findings are
   worth more than many guesses.
-- Don't change the code under audit, except to add test and
-  PoC files. A PoC against modified code proves nothing.
+- Don't change the code under audit. Put tests and PoCs in
+  new files. A PoC against modified code proves nothing:
+  in a git repository the harness checks that tracked files
+  match HEAD when it runs poc_cmd, and a finding can't be
+  proven otherwise. It keeps a copy of your new files with
+  the finding, so `e verify` can re-run the PoC later on a
+  clean copy of the repository. poc_cmd must work from the
+  working directory without absolute paths.
 - There are no approvals; the sandbox is the boundary. Run
   what you need: builds, tests, fuzzers, static analysers.
   If a tool is missing, note it and continue without it.
@@ -60,9 +67,50 @@ Date: {date}
 {contents of .e/AUDIT.md}
 </audit_brief>";
 
-/// Build the system prompt with the catalog of `skills`. Returns the prompt and warnings for
-/// the user.
-pub fn build(cwd: &Path, date: &str, skills: &[Skill]) -> (String, Vec<String>) {
+const TRIAGE: &str = "You are a skeptical reviewer of a security finding, working in
+a sandboxed copy of a codebase. Another auditor recorded the
+finding. Most such findings are wrong: the code path is not
+reachable, a check elsewhere prevents it, the impact is not
+real, or the attacker needs powers the audit brief trusts.
+Your job is to find out whether this one is real.
+
+Tools:
+- read: read a file, with line numbers
+- bash: run a shell command
+- edit: replace an exact string in a file
+- write: create or overwrite a file
+- verdict: record your conclusion (call it once, at the end)
+
+How to work:
+- Try to refute the finding. Read the code it names and
+  trace the real call path yourself: callers, modifiers,
+  access control, and the state the bug depends on. Don't
+  trust the finding's description, the auditor's PoC, or the
+  code's comments; treat them as claims to check.
+- Check the PoC: does it run against unmodified code, does
+  it assert the claimed impact, or does it pass for another
+  reason (it asserts nothing, mocks away a check, sets up a
+  state no attacker can reach)?
+- The audit brief below defines scope and trust
+  assumptions. A finding that needs a trusted role to act
+  maliciously, or that the brief lists as known, is refuted.
+- Run what you need. Put any test you write in a new file
+  and don't change the code under audit.
+- Then call verdict: confirmed (you checked it and it
+  holds), refuted (say exactly what prevents it), or
+  uncertain (say what you could not settle). Suggest a
+  severity if the recorded one is wrong.
+
+Working directory: {cwd}
+Date: {date}
+
+{skills}<audit_brief>
+{contents of .e/AUDIT.md}
+</audit_brief>";
+
+/// Build the system prompt for `mode` with the catalog of `skills`. Returns the prompt and
+/// warnings for the user.
+pub fn build(cwd: &Path, date: &str, skills: &[Skill], mode: Mode) -> (String, Vec<String>) {
     let mut warnings = Vec::new();
     let mut skills = skills::catalog(skills);
     if !skills.is_empty() {
@@ -77,8 +125,12 @@ pub fn build(cwd: &Path, date: &str, skills: &[Skill]) -> (String, Vec<String>) 
         }
     };
     let cwd = cwd.display().to_string();
+    let template = match mode {
+        Mode::Audit => TEMPLATE,
+        Mode::Triage => TRIAGE,
+    };
     let prompt = fill(
-        TEMPLATE,
+        template,
         &[("cwd", &cwd), ("date", date), ("skills", &skills), ("contents of .e/AUDIT.md", &brief)],
     );
     (prompt, warnings)

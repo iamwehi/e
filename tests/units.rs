@@ -144,7 +144,7 @@ fn tool_arguments_are_summarized_on_one_short_line() {
 #[test]
 fn prompt_without_skills_or_brief() {
     let d = tempdir("bare-prompt");
-    let (p, warnings) = e::prompt::build(&d, "2026-01-02", &[]);
+    let (p, warnings) = e::prompt::build(&d, "2026-01-02", &[], e::agent::Mode::Audit);
     assert!(!p.contains("available_skills"), "no skills, no catalog");
     assert!(p.ends_with("<audit_brief>\n(no audit brief provided)\n</audit_brief>"));
     assert!(p.contains("Date: 2026-01-02"));
@@ -153,8 +153,8 @@ fn prompt_without_skills_or_brief() {
     // The brief is trimmed and the prompt is deterministic.
     std::fs::create_dir_all(d.join(".e")).unwrap();
     std::fs::write(d.join(".e/AUDIT.md"), "\n\n  Scope: all  \n\n").unwrap();
-    let (a, _) = e::prompt::build(&d, "2026-01-02", &[]);
-    let (b, _) = e::prompt::build(&d, "2026-01-02", &[]);
+    let (a, _) = e::prompt::build(&d, "2026-01-02", &[], e::agent::Mode::Audit);
+    let (b, _) = e::prompt::build(&d, "2026-01-02", &[], e::agent::Mode::Audit);
     assert_eq!(a, b);
     assert!(a.ends_with("<audit_brief>\nScope: all\n</audit_brief>"));
 }
@@ -220,7 +220,7 @@ fn transcripts_get_their_own_directory_and_typed_lines() {
 
 #[test]
 fn tool_schemas_are_well_formed() {
-    let s = tools::schemas();
+    let s = tools::schemas(e::agent::Mode::Audit);
     let tools = s.as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["function"]["name"].as_str().unwrap()).collect();
     assert_eq!(names, ["read", "bash", "edit", "write", "finding"]);
