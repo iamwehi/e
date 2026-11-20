@@ -65,9 +65,10 @@ fn read_numbers_lines_and_caps_output() {
 async fn bash_output_is_truncated_to_the_tail_and_saved_in_full() {
     let d = tempdir("trunc");
     let log = d.join("out.log");
-    let x = exec::run("seq 1 100000; echo LAST >&2", &d, Duration::from_secs(30), &log, &Cancel::default())
-        .await
-        .unwrap();
+    let x =
+        exec::run("seq 1 100000; echo LAST >&2", &d, Duration::from_secs(30), &log, &[], &Cancel::default())
+            .await
+            .unwrap();
     assert_eq!(x.exit_code, Some(0));
     assert!(x.truncated());
     assert!(x.tail.len() as u64 <= exec::TAIL_BYTES);
@@ -82,6 +83,7 @@ async fn bash_output_is_truncated_to_the_tail_and_saved_in_full() {
         &d,
         Duration::from_secs(5),
         &log,
+        &[],
         &Cancel::default(),
     )
     .await
@@ -121,8 +123,9 @@ async fn timeout_kills_the_whole_process_tree() {
         p = pids.display()
     );
     let t = Instant::now();
-    let x =
-        exec::run(&cmd, &d, Duration::from_millis(800), &d.join("log"), &Cancel::default()).await.unwrap();
+    let x = exec::run(&cmd, &d, Duration::from_millis(800), &d.join("log"), &[], &Cancel::default())
+        .await
+        .unwrap();
     assert!(x.timed_out && x.exit_code.is_none());
     assert!(t.elapsed() < Duration::from_secs(5));
     assert!(x.model_text().contains("timed out"));
@@ -139,7 +142,8 @@ async fn background_processes_do_not_outlive_the_command() {
     let pids = d.join("pids");
     let cmd =
         format!("sleep 300 & echo $! >> {p}; sleep 300 & echo $! >> {p}; echo started", p = pids.display());
-    let x = exec::run(&cmd, &d, Duration::from_secs(10), &d.join("log"), &Cancel::default()).await.unwrap();
+    let x =
+        exec::run(&cmd, &d, Duration::from_secs(10), &d.join("log"), &[], &Cancel::default()).await.unwrap();
     assert_eq!(x.exit_code, Some(0));
     tokio::time::sleep(Duration::from_millis(200)).await;
     for pid in wait_pids(&pids).await {
@@ -157,7 +161,7 @@ async fn cancel_kills_a_running_command() {
         c2.cancel();
     });
     let t = Instant::now();
-    let x = exec::run("sleep 300", &d, Duration::from_secs(60), &d.join("log"), &c).await.unwrap();
+    let x = exec::run("sleep 300", &d, Duration::from_secs(60), &d.join("log"), &[], &c).await.unwrap();
     assert!(x.interrupted && t.elapsed() < Duration::from_secs(5));
 }
 

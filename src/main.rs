@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const USAGE: &str = "usage: e [--model ID] [--verbose] [-p TASK [--json]]
+       e report
+
+  report       print the findings in .e/findings as Markdown
 
   -p TASK      run one task headless and print the final message
   --json       with -p: stream transcript events to stdout as JSON lines
@@ -32,11 +35,20 @@ struct Args {
     json: bool,
     verbose: bool,
     model: Option<String>,
+    report: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut a = Args::default();
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
+    if it.peek().map(String::as_str) == Some("report") {
+        it.next();
+        if let Some(arg) = it.next() {
+            return Err(format!("unknown argument: {arg}"));
+        }
+        a.report = true;
+        return Ok(a);
+    }
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-p" | "--print" => a.task = Some(it.next().ok_or("-p needs a task")?),
@@ -159,6 +171,9 @@ fn main() -> ExitCode {
             return ExitCode::from(if e.is_empty() { 0 } else { 2 });
         }
     };
+    if args.report {
+        return report();
+    }
     term::save_terminal();
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -177,6 +192,33 @@ fn main() -> ExitCode {
     exec::kill_all_groups();
     term::restore_terminal();
     ExitCode::from(code)
+}
+
+/// `e report`: the findings as Markdown on stdout, warnings on stderr. Needs no config or key.
+fn report() -> ExitCode {
+    let dir = match std::env::current_dir() {
+        Ok(d) => d.join(".e").join("findings"),
+        Err(e) => {
+            eprintln!("e: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut warnings = Vec::new();
+    let findings = e::report::load(&dir, &mut warnings);
+    for w in &warnings {
+        eprintln!("e: warning: {w}");
+    }
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    match out.write_all(e::report::render(&findings).as_bytes()).and_then(|_| out.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        // `e report | head` closes the pipe early; that is not an error.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("e: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 async fn async_main(args: Args) -> u8 {

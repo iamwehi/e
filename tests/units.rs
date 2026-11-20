@@ -352,28 +352,31 @@ async fn bash_tool_reports_failure_and_logs_by_sequence() {
 async fn exec_runs_in_the_working_directory_with_no_stdin() {
     let d = tempdir("exec");
     let log = d.join("log");
-    let x = exec::run("pwd; cat; echo after-cat", &d, Duration::from_secs(10), &log, &Cancel::default())
+    let x = exec::run("pwd; cat; echo after-cat", &d, Duration::from_secs(10), &log, &[], &Cancel::default())
         .await
         .unwrap();
     assert_eq!(x.exit_code, Some(0));
     let canon = std::fs::canonicalize(&d).unwrap();
     assert_eq!(x.tail, format!("{}\nafter-cat\n", canon.display()), "cat sees EOF at once");
     // Killed by a signal: 128 + signal number, like a shell.
-    let x = exec::run("kill -9 $$", &d, Duration::from_secs(10), &log, &Cancel::default()).await.unwrap();
+    let x =
+        exec::run("kill -9 $$", &d, Duration::from_secs(10), &log, &[], &Cancel::default()).await.unwrap();
     assert_eq!(x.exit_code, Some(137));
     assert!(!x.success());
     assert_eq!(x.status_line().split(" · ").next(), Some("exit 137"));
     // No output at all.
-    let x = exec::run("true", &d, Duration::from_secs(10), &log, &Cancel::default()).await.unwrap();
+    let x = exec::run("true", &d, Duration::from_secs(10), &log, &[], &Cancel::default()).await.unwrap();
     assert!(x.tail.is_empty() && x.model_text().starts_with("[exit code 0, "));
     // Invalid UTF-8 in output does not fail the tool.
-    let x = exec::run("printf 'a\\xffb\\n'", &d, Duration::from_secs(10), &log, &Cancel::default())
+    let x = exec::run("printf 'a\\xffb\\n'", &d, Duration::from_secs(10), &log, &[], &Cancel::default())
         .await
         .unwrap();
     assert_eq!(x.tail, "a\u{fffd}b\n");
     // A missing working directory is an error, not a panic.
     assert!(
-        exec::run("true", &d.join("gone"), Duration::from_secs(1), &log, &Cancel::default()).await.is_err()
+        exec::run("true", &d.join("gone"), Duration::from_secs(1), &log, &[], &Cancel::default())
+            .await
+            .is_err()
     );
 }
 
@@ -382,7 +385,8 @@ async fn interrupted_exec_says_so() {
     let d = tempdir("exec-int");
     let c = Cancel::default();
     c.cancel();
-    let x = exec::run("echo hi; sleep 30", &d, Duration::from_secs(60), &d.join("log"), &c).await.unwrap();
+    let x =
+        exec::run("echo hi; sleep 30", &d, Duration::from_secs(60), &d.join("log"), &[], &c).await.unwrap();
     assert!(x.interrupted && x.exit_code.is_none() && !x.success());
     assert!(x.status_line().starts_with("interrupted · "));
     assert!(x.model_text().contains("[interrupted by the user after "));

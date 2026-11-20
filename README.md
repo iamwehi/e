@@ -8,7 +8,12 @@ OpenAI-compatible chat completions API (such as DeepSeek's own) works by
 config.
 
 `e` assumes it runs inside an external sandbox: it has no approvals,
-permission prompts, command filtering or path restrictions.
+permission prompts, command filtering or path restrictions. The sandbox does
+not protect the API key, though, since `e` holds it inside: so `e` removes it
+(and every variable in `scrub_env`) from the environment of each command the
+agent runs, because those commands run the code under audit. An `api_key` in
+the config file is still readable by anything that can read the file; keep
+the file outside the sandbox or use the environment variable.
 
 ## Usage
 
@@ -21,7 +26,14 @@ cd path/to/target && e
 e -p "Audit src/Vault.sol"            # headless: prints the final message
 e -p "Audit src/Vault.sol" --json     # headless: transcript events as JSON lines
 e -p "/reentrancy Audit src/Vault.sol" # start a skill, then the task
+e report > REPORT.md                  # the findings as Markdown
 ```
+
+`e report` reads `.e/findings/` and prints one Markdown document: a summary,
+a table, then each finding with its PoC command, result and the last 40 lines
+of its output. Proven findings come first, then by severity. Findings in the
+same file and bug class with overlapping lines are marked as possible
+duplicates of each other. It needs no config or key and starts no run.
 
 At the prompt: `/model <id>`, `/new`, `/skills`, `/<skill> [task]` (Tab completes names).
 Ctrl-X Ctrl-E opens the prompt in `$VISUAL` (else `$EDITOR`, else `vi`); when
@@ -41,7 +53,7 @@ Exit codes: 0 done, 1 error, 2 context budget exhausted, 130 interrupted,
 | `NOTES.md` | the agent | Memory between runs. The harness never parses it. |
 | `skills/<name>/` | you | Project [skills](#skills). |
 | `runs/<timestamp>/` | harness | `transcript.jsonl`, plus `bash/` and `poc/` output logs. One per session. |
-| `findings/<id>.json` | `finding` tool | Status is `proven` only if `poc_cmd` exited 0 when the harness ran it. |
+| `findings/<id>.json` | `finding` tool | Status is `proven` only if `poc_cmd` exited 0 when the harness ran it. `e report` renders them. |
 
 ## Skills
 
@@ -86,6 +98,7 @@ base_url = "https://api.venice.ai/api/v1"
 model = "deepseek-v4-1-flash"
 api_key_env = "VENICE_API_KEY"
 # api_key = "..."            # fallback when $VENICE_API_KEY is unset
+scrub_env = ["VENICE_API_KEY", "DEEPSEEK_API_KEY"]  # removed from commands, as is api_key_env
 prompt_cache_key = true
 prompt_cache_retention = "extended"
 prompt_cache_retention_models = ["openai-gpt-52", "openai-gpt-54", "openai-gpt-55", "openai-gpt-55-pro"]

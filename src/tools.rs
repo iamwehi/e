@@ -243,7 +243,7 @@ async fn bash(ctx: &Ctx<'_>, a: BashArgs) -> Output {
         _ => return Output::err(format!("timeout_s must be a positive number, got {secs}")),
     };
     let log = ctx.run_dir.join("bash").join(format!("{:04}.log", ctx.seq));
-    match exec::run(&a.command, ctx.cwd, timeout, &log, ctx.cancel).await {
+    match exec::run(&a.command, ctx.cwd, timeout, &log, &ctx.cfg.scrubbed_env(), ctx.cancel).await {
         Ok(x) => Output { content: x.model_text(), is_error: !x.success(), summary: x.status_line() },
         Err(e) => Output::err(format!("failed to run command: {e}")),
     }
@@ -358,7 +358,7 @@ async fn finding(ctx: &Ctx<'_>, a: FindingArgs) -> Output {
         Some(cmd) => {
             let log = ctx.run_dir.join("poc").join(format!("{id}-{:04}.log", ctx.seq));
             let timeout = Duration::from_secs(ctx.cfg.poc_timeout_s);
-            match exec::run(cmd, ctx.cwd, timeout, &log, ctx.cancel).await {
+            match exec::run(cmd, ctx.cwd, timeout, &log, &ctx.cfg.scrubbed_env(), ctx.cancel).await {
                 Ok(x) => Some(x),
                 Err(e) => {
                     note = format!("Failed to run poc_cmd: {e}");

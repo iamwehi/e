@@ -37,6 +37,10 @@ pub struct Config {
     pub api_key_env: String,
     /// Fallback when the `api_key_env` variable is unset.
     pub api_key: Option<String>,
+    /// Environment variables removed from every command the agent runs (`bash`
+    /// and PoCs), on top of `api_key_env`, which is always removed: the code
+    /// under audit runs there and must not see API keys.
+    pub scrub_env: Vec<String>,
     /// Extra top-level request fields, merged into every request body.
     pub extra_body: Map<String, Value>,
     /// Send a per-session `prompt_cache_key` so requests reach a warm cache.
@@ -91,6 +95,7 @@ impl Default for Config {
             model: "deepseek-v4-1-flash".into(),
             api_key_env: "VENICE_API_KEY".into(),
             api_key: None,
+            scrub_env: ["VENICE_API_KEY", "DEEPSEEK_API_KEY"].map(String::from).to_vec(),
             extra_body,
             prompt_cache_key: true,
             // Venice forwards "extended" (24 h) to OpenAI and other models ignore
@@ -174,6 +179,15 @@ impl Config {
             Ok(k) if !k.trim().is_empty() => Some(k.trim().to_string()),
             _ => self.api_key.clone().filter(|k| !k.is_empty()),
         }
+    }
+
+    /// Variables to remove from the environment of every command: `api_key_env`
+    /// and `scrub_env`.
+    pub fn scrubbed_env(&self) -> Vec<&str> {
+        let mut v = vec![self.api_key_env.as_str()];
+        v.extend(self.scrub_env.iter().map(String::as_str).filter(|n| *n != self.api_key_env));
+        v.retain(|n| !n.is_empty());
+        v
     }
 
     /// The `prompt_cache_retention` to send for `model`, if any.
